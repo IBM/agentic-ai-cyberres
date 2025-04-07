@@ -9,9 +9,9 @@ An AI agent that improves cyber resiliency by autonomously identifying enterpris
 # Installation
 1. Clone the repository
 
-<pre><code>git clone https://github.ibm.com/efarr/agentic-ai-cyberres.git
+<pre><code>git clone https://github.com/IBM/agentic-ai-cyberres.git
 # or if repo requires a ssh key instead of password
-git clone git@github.ibm.com:efarr/agentic-ai-cyberres.git
+git clone git@github.com:IBM/agentic-ai-cyberres.git
 </code></pre> 
 
 2. Change into working directory
