@@ -1,0 +1,166 @@
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class SimpleGuardrailAgent:
+    def __init__(self):
+        pass
+
+    def process_paragraph(self, paragraph: str) -> str:
+        # Guardrail: Validate input type and content
+        if not isinstance(paragraph, str):
+            logger.error("Input must be a string")
+            return "Error: Input must be a string."
+        if not paragraph.strip():
+            logger.error("Input paragraph is empty")
+            return "Error: Input paragraph is empty."
+
+        # Guardrail: Ethical check - simple keyword filter
+        disallowed_keywords = ['hate', 'violence', 'terrorism', 'illegal', 'abuse']
+        lower_paragraph = paragraph.lower()
+        if any(keyword in lower_paragraph for keyword in disallowed_keywords):
+            logger.warning("Input contains disallowed content related to ethics")
+            return "Error: Input contains disallowed or unethical content and will not be processed."
+
+        # Guardrail: Profanity filter (example list)
+        profanity_keywords = ['damn', 'hell', 'crap']
+        if any(word in lower_paragraph for word in profanity_keywords):
+            logger.warning("Input contains profanity")
+            return "Error: Input contains inappropriate language and will not be processed."
+
+        # Guardrail: Check for excessive punctuation
+        punctuation_count = sum(paragraph.count(c) for c in ['!', '?', '.', ',', ';', ':'])
+        if punctuation_count > 100:
+            logger.warning("Input contains excessive punctuation")
+            return "Error: Input contains excessive punctuation and may be spam."
+
+        # Guardrail: Check for repeated characters (e.g., more than 5 in a row)
+        import re
+        if re.search(r'(.)\1{5,}', paragraph):
+            logger.warning("Input contains repeated characters")
+            return "Error: Input contains repeated characters and may be spam."
+
+        # Guardrail: Limit number of sentences
+        sentence_count = paragraph.count('.') + paragraph.count('!') + paragraph.count('?')
+        if sentence_count > 50:
+            logger.warning("Input contains too many sentences")
+            return "Error: Input contains too many sentences."
+
+        # Guardrail: Limit input length to prevent excessive processing
+        max_length = 1000
+        if len(paragraph) > max_length:
+            logger.warning(f"Input paragraph too long ({len(paragraph)} chars), truncating to {max_length} chars")
+            paragraph = paragraph[:max_length]
+
+        # Guardrail: Check for disallowed content (example: no digits allowed)
+        if any(char.isdigit() for char in paragraph):
+            logger.warning("Input contains digits, which are not allowed")
+            return "Error: Input contains digits, which are not allowed."
+
+        # Simple processing: count words and sentences
+        word_count = len(paragraph.split())
+        sentence_count = paragraph.count('.') + paragraph.count('!') + paragraph.count('?')
+
+        result = (
+            f"Processed paragraph:\n"
+            f"Word count: {word_count}\n"
+            f"Sentence count: {sentence_count}\n"
+        )
+        logger.info("Paragraph processed successfully")
+        return result
+
+if __name__ == "__main__":
+    agent = SimpleGuardrailAgent()
+
+    print("Please enter a paragraph for processing:")
+    user_input = input()
+
+    output = agent.process_paragraph(user_input)
+    print(output)
+=======
+import logging
+import re
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class SimpleGuardrailAgent:
+    def __init__(self):
+        pass
+
+    def process_paragraph(self, paragraph: str) -> str:
+        # Guardrail: Validate input type and content
+        if not isinstance(paragraph, str):
+            logger.error("Input must be a string")
+            return "Error: Input must be a string."
+        if not paragraph.strip():
+            logger.error("Input paragraph is empty")
+            return "Error: Input paragraph is empty."
+
+        # Guardrail: Ethical check - simple keyword filter
+        disallowed_keywords = ['hate', 'violence', 'terrorism', 'illegal', 'abuse']
+        lower_paragraph = paragraph.lower()
+        if any(keyword in lower_paragraph for keyword in disallowed_keywords):
+            logger.warning("Input contains disallowed content related to ethics")
+            return "Error: Input contains disallowed or unethical content and will not be processed."
+
+        # Guardrail: Profanity filter (example list)
+        profanity_keywords = ['damn', 'hell', 'crap']
+        if any(word in lower_paragraph for word in profanity_keywords):
+            logger.warning("Input contains profanity")
+            return "Error: Input contains inappropriate language and will not be processed."
+
+        # Guardrail: Check for excessive punctuation
+        punctuation_count = sum(paragraph.count(c) for c in ['!', '?', '.', ',', ';', ':'])
+        if punctuation_count > 100:
+            logger.warning("Input contains excessive punctuation")
+            return "Error: Input contains excessive punctuation and may be spam."
+
+        # Guardrail: Check for repeated characters (e.g., more than 5 in a row)
+        if re.search(r'(.)\1{5,}', paragraph):
+            logger.warning("Input contains repeated characters")
+            return "Error: Input contains repeated characters and may be spam."
+
+        # Guardrail: Limit number of sentences
+        sentence_count = paragraph.count('.') + paragraph.count('!') + paragraph.count('?')
+        if sentence_count > 50:
+            logger.warning("Input contains too many sentences")
+            return "Error: Input contains too many sentences."
+
+        # Guardrail: Limit input length to prevent excessive processing
+        max_length = 1000
+        if len(paragraph) > max_length:
+            logger.warning(f"Input paragraph too long ({len(paragraph)} chars), truncating to {max_length} chars")
+            paragraph = paragraph[:max_length]
+
+        # Guardrail: Check for disallowed content (example: no digits allowed)
+        # Removed digit disallowance to allow backup commands with numbers
+        # if any(char.isdigit() for char in paragraph):
+        #     logger.warning("Input contains digits, which are not allowed")
+        #     return "Error: Input contains digits, which are not allowed."
+
+        # Guardrail: Backup and snapshot specific keyword check
+        backup_keywords = ['backup', 'restore', 'snapshot', 'incremental', 'full backup', 'differential', 'replication', 'archive']
+        if not any(keyword in lower_paragraph for keyword in backup_keywords):
+            logger.warning("Input does not contain backup or snapshot related content")
+            return "Error: Input does not appear to be related to backup or snapshot operations."
+
+        # Simple processing: count words and sentences
+        word_count = len(paragraph.split())
+        sentence_count = paragraph.count('.') + paragraph.count('!') + paragraph.count('?')
+
+        result = (
+            f"Processed backup/snapshot paragraph:\n"
+            f"Word count: {word_count}\n"
+            f"Sentence count: {sentence_count}\n"
+        )
+        logger.info("Backup/snapshot paragraph processed successfully")
+        return result
+
+if __name__ == "__main__":
+    agent = SimpleGuardrailAgent()
+
+    print("Please enter a backup or snapshot related paragraph for processing:")
+    user_input = input()
+
+    output = agent.process_paragraph(user_input)
+    print(output)
