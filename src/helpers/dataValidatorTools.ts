@@ -15,7 +15,7 @@ export const FindRunningProcessesTool = new DynamicTool({
   name: "FindRunningProcesses",
   description: "Determine what applications are running on the system by looking at running processesu. Disregard processes that are used by typical Linux system processes",
   inputSchema: z.object({
-    min: z.number().int().min(0),
+    argument: z.string()
   }),
   async handler(input) {
 
@@ -45,7 +45,7 @@ export const FindRunningProcessesTool = new DynamicTool({
  */
 export const MongoDBDataValidatorTool = new DynamicTool({
   name: "MongoDBDataValidator",
-  description: "This tool validates a mongodb database to ensure the database is not corrupted. Do not use this tool to validate anything that is nto mongoDB. It can only be used if mongoDB is currently running.",
+  description: "This tool validates a mongod database to ensure the database is not corrupted. Do not use this tool to validate anything that is not mongod. It can only be used if mongod is currently running.",
   inputSchema: z.object({
     argument: z.string()
   }),
@@ -53,15 +53,15 @@ export const MongoDBDataValidatorTool = new DynamicTool({
 
 	var returnString = new String;
 	var stdout = new String;
-	let workloadToValidate: string = "mongodb";
+	let workloadToValidate: string = "mongod";
 
 	console.log(`argument: `+ input.argument);
-	// if argument is not mongond, then agent is trying to use this tool to validate another workload.  Don't let it.
+	// if argument is not mongod, then agent is trying to use this tool to validate another workload.  Don't let it.
 	if (input.argument !== workloadToValidate) {
-		console.log(input.argument + ` is not a mongoDB workload. This tool cannot be used to validate ` + input.argument);
+		console.log(input.argument + ` is not a mongod workload. This tool cannot be used to validate ` + input.argument);
 		returnString = "Validation Failed. Reason: " + input.argument + " cannot be used to validate " + workloadToValidate;
 	} else {
-		console.log(`Validating mongoDB workload: `+ input.argument);
+		console.log(`Validating mongod workload: `+ input.argument);
 
 		// do shell escape to run mongodb commands through mongosh
 		try {
