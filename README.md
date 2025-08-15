@@ -3,59 +3,60 @@ An AI agent that improves cyber resiliency by autonomously identifying enterpris
 
 
 # Pre-requisites
-1. Node.js (>= 18.0.0) runtime is needed to work with Bee Agent Framework.
-2. LLM Inference provider
-- e.g. watsonx, Ollama, Groq, OpenAI, GCP, AWS Bedrock 
+- Node.js (>= 18.0.0) runtime is needed to work with Bee Agent Framework.
+- LLM Inference provider: e.g. watsonx, Ollama, Groq, OpenAI, GCP, AWS Bedrock 
 
 # Installation
 1. Clone the repository
 
-<pre><code>  git clone https://github.ibm.com/efarr/agentic-ai-cyberres.git
-  # or if repo requires a ssh key instead of password
-  git clone git@github.ibm.com:efarr/agentic-ai-cyberres.git
-
-  # change into working directory
-  cd agentic-ai-cyberres
+<pre><code>git clone https://github.com/IBM/agentic-ai-cyberres.git
+# or if repo requires a ssh key instead of password
+git clone git@github.com:IBM/agentic-ai-cyberres.git
 </code></pre> 
 
-1. Setup node.js
+2. Change into working directory
+<pre><code>cd agentic-ai-cyberres
+</code></pre> 
 
-<code>nvm install
-</code>
+3. Setup node.js
 
-2. Install dependencies
+<pre><code>nvm install
+</code></pre>
 
-<code>npm ci
-</code>
+4. Install dependencies
+<pre><code>npm ci
+</code></pre>
 
 
-3. Copy .env.template to .env
+5. Copy .env.template to .env
    
-<code>cp .env.template .env</code>
+<pre><code>cp .env.template .env</code></pre>
 
-5. Update .env to set your LLM provider and related settings.  
+6. Update .env to set your LLM provider and related settings.  
 
-See ibm.com/watsonx to try watsonx for free, which will also provide a project ID and API key.  You choose which region to usa.
-If using watsonx, set the API key and watsonx project, and other watsonx settings below:
-<code>  
+See [ibm.com/watsonx](ibm.com/watsonx) to try watsonx for free, which will also provide a project ID and API key.  You choose which region to use.
+If using watsonx, set the API key, watsonx project ID and region as specified in your cloud account. Choose your watsonx model.
+If using another model, set the LLM_BACKEND accordingly.
+<pre><code>  
 LLM_BACKEND="watsonx"
 WATSONX_API_KEY=""
 WATSONX_PROJECT_ID=""
 WATSONX_MODEL="ibm/granite-3-8b-instruct"
 WATSONX_REGION="us-south"
-</code>
+</code></pre>
 
 
-5. Update .env to set the environment variables used by the agent's tools, to set email address and mongoDB name and collection
-<code># Variables for agentic-ai-cyberres data validation agent and tools
+7. Update .env to set the environment variables used by the agent's tools, to set email address and mongoDB name and collection
+<pre><code># Variables for agentic-ai-cyberres data validation agent and tools
 USER_EMAIL=""
 MONGO_DB_CONN_STRING="mongodb://localhost"
 MONGODB_NAME=""
-MONGODB_COLLECTION_NAME=""</code>
+MONGODB_COLLECTION_NAME=""</code></pre>
    
 # Using agentic-ai-cyberres agent
-<code># to run interactively
+<pre><code># to run interactively
 npm run start src/agent.ts
-# to run autonomously (e.g. through cron, ansible)
-npm run start src/agent.ts <<< "Check if mongoDB is running and if so, validate the mongoDB database by passing in mongondb as a parameter"</code>
+</code></pre>
+<pre><code># to run autonomously (e.g. through cron, ansible)
+npm run start src/agent.ts <<< "Check if mongoDB is running and if so, validate the mongoDB database by passing in mongondb as a parameter"</code></pre>
 
