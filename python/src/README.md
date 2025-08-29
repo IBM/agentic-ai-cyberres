@@ -13,16 +13,21 @@ This folder contains Python helper modules for system validation tools, primaril
 ## Requirements
 
 - Python 3.x
-- System commands: `ps`, `mongosh`, `sendmail`, `netstat` (must be installed and available in PATH)
-- Environment variable `USER_EMAIL` set for `SendEmailTool`
-- Run agent.py to execute the functionality
+create a virtual environment, run the following commands:
 
-## Notes
+```
+cd python/src
+python3 -m venv venv
+. venv/bin/activate
+```
 
-- The tools use Python's `subprocess` module to execute system commands.
-- Error handling is included for command execution failures.
-- The MongoDB validator requires the `mongosh` shell and a JavaScript validation script at `src/helpers/mongoDBDataValidator.js`.
 
-## License
+Install the relevant requirements:
 
-This code is part of the agentic-ai-cyberres project and is subject to its license.
+```
+pip3 install -r requirements.txt
+```
+
+
+Execution:
+Run python3 main.py
