@@ -132,8 +132,4 @@ dist
 python/cyberres-mcp/.venv/*
 
 python/cyberres-mcp/__pycache__/
-<<<<<<< HEAD
 python/cyberres-mcp/plugins/__pycache__/
-=======
-python/cyberres-mcp/pligins/__pycache__/
->>>>>>> 8986f70 (updated gitignore)
