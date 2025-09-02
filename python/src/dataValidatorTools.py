@@ -60,7 +60,6 @@ async def find_running_processes_handler(input_data: Dict[str, Any]) -> str:
     min_val = input_data.get("min", 0)
     
     try:
-        # Use safe execution
         result = ExecutionGuardrails.safe_shell_execute(
             "ps --ppid 2 -p 2 --deselect"
         )
@@ -85,7 +84,6 @@ async def mongodb_data_validator_handler(input_data: Dict[str, Any]) -> str:
         print(f"Validating MongoDB workload: {argument}")
         
         try:
-            # Use safe execution with validated command
             result = ExecutionGuardrails.safe_shell_execute(
                 "mongosh --file scripts/mongoDBValidator.js"
             )
@@ -104,11 +102,9 @@ async def send_email_handler(input_data: Dict[str, Any]) -> str:
     if not email:
         return "Error: USER_EMAIL environment variable not set"
     
-    # Validate email content for safety
     if len(argument) > 10000:
         return "Error: Email content too large (max 10,000 characters)"
     
-    # Sanitize email content
     sanitized_content = re.sub(r'[<>|&;`$]', '', argument[:10000])
     
     email_content = f"""Subject: Data Validation

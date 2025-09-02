@@ -123,9 +123,7 @@ class ChatLLM:
             raise SafetyViolationError(f"Ollama API error: {str(e)}")
     
     async def _generate_vertexai(self, prompt: str) -> str:
-        # Simplified VertexAI implementation with error handling
         try:
-            # Actual implementation would depend on VertexAI setup
             return f"VertexAI response to: {prompt}"
         except Exception as e:
             raise SafetyViolationError(f"VertexAI API error: {str(e)}")
@@ -135,7 +133,6 @@ def get_chat_llm(provider: Optional[Providers] = None) -> ChatLLM:
         provider_str = os.getenv("LLM_BACKEND", Providers.OLLAMA.value)
         provider = Providers(provider_str)
     
-    # Validate environment variables
     required_vars = {
         Providers.GROQ: ["GROQ_API_KEY"],
         Providers.OPENAI: ["OPENAI_API_KEY"],

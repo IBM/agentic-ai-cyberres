@@ -121,7 +121,6 @@ class BeeAgent:
         return f"Failed to execute tool {tool_name} after {self.max_retries_per_step} retries"
 
 
-# Add DynamicTool class definition here since it's used by the tools
 class DynamicTool:
     def __init__(self, name: str, description: str, handler):
         self.name = name
