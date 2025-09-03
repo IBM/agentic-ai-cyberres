@@ -1,5 +1,9 @@
-beeai==1.0.1
-beeai-framework==0.1.27
+beeai-framework==0.1.41
 duckduckgo_search==8.0.5
 langchain-community==0.3.27
 langchain-core==0.3.71
+beeai-framework[beeai-platform]
+beeai-framework[llama_index]
+termcolor
+unstructured
+Markdown
