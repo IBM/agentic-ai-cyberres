@@ -12,7 +12,7 @@ from dataValidatorTools import (
     SendEmailTool,
     FindWhatsRunningByPortsTool
 )
-from beeai_framework.memory import TokenMemory
+# from beeai_framework.memory import TokenMemory
 from beeai_framework.backend import AssistantMessage
 from beeai_framework.backend import UserMessage
 from langchain_community.chat_message_histories import SQLChatMessageHistory
@@ -39,9 +39,9 @@ async def load_memory(chat_model: ChatLLM, conv_history: SQLChatMessageHistory )
     messages = conv_history.get_messages()
     for message in messages:
         if message.type == "human":
-            await memory.add(UserMessage(content=message.content))
+            memory.add_message(role="user", content=message.content)
         if message.type == "ai":
-            await memory.add(AssistantMessage(content=message.content))
+            memory.add_message(role="assistant", content=message.content)
     return memory
 
 async def main():
