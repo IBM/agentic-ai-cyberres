@@ -10,6 +10,7 @@ import { getChatLLM } from "./helpers/llm.js";
 import { DuckDuckGoSearchTool } from "bee-agent-framework/tools/search/duckDuckGoSearch";
 import { createConsoleReader } from "./helpers/reader.js";
 import { MongoDBDataValidatorTool } from "./helpers/dataValidatorTools.ts";
+import { PostgreSQLDataValidatorTool } from "./helpers/dataValidatorTools.ts";
 import { FindWhatsRunningByPortsTool } from "./helpers/dataValidatorTools.ts";
 import { FindRunningProcessesTool } from "./helpers/dataValidatorTools.ts";
 import { SendEmailTool } from "./helpers/dataValidatorTools.ts";
@@ -18,7 +19,7 @@ const llm = getChatLLM();
 const agent = new BeeAgent({
   llm,
   memory: new TokenMemory({ llm }),
-  tools: [new OpenMeteoTool(), new DuckDuckGoSearchTool(), MongoDBDataValidatorTool, FindWhatsRunningByPortsTool, FindRunningProcessesTool, SendEmailTool ],
+  tools: [new OpenMeteoTool(), new DuckDuckGoSearchTool(), MongoDBDataValidatorTool, PostgreSQLDataValidatorTool, FindWhatsRunningByPortsTool, FindRunningProcessesTool, SendEmailTool ],
 });
 
 const reader = createConsoleReader({ fallback: "What are the most common enterprise applications that run on Linux in the industry today?  Do not include Linux or Linux distributions in the results.  Do not identify what's currently running." });
