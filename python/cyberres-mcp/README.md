@@ -1,10 +1,14 @@
+<!--
+Copyright contributors to the agentic-ai-cyberres project
+-->
+
 # Running the MCP Server on RHEL with uv CLI and Connecting from Local Browser
 
 This guide explains how to run the MCP server located in `server.py` on a Red Hat Enterprise Linux (RHEL) system using the `uv` CLI tool, and how to connect to it from a local browser using the Model Context Protocol (MCP) inspector.
 
 ## Prerequisites
 
-- Python 3.8 or higher installed on your RHEL system.
+- Python 3.13 or higher installed on your RHEL system.
 - Network access to the RHEL server from your local machine.
 - Node.js and npm installed on your local machine (for MCP inspector).
 
@@ -22,19 +26,47 @@ This guide explains how to run the MCP server located in `server.py` on a Red Ha
    uv add . --dev
    ```
 
-3. **Activate the Python virtual environment:**
+3. **Run the server:**
 
    ```bash
-   source .venv/bin/activate
-   ```
+   # Preferred (console script)
+   uv run cyberres-mcp
 
-4. **Run the server:**
-
-   ```bash
+   # Or run the module directly
    uv run server.py
    ```
 
    This will start the MCP server and listen on all interfaces.
+
+### Configuration via environment
+
+The server reads environment variables (via `.env` if present):
+
+```bash
+MCP_HOST=0.0.0.0
+MCP_PORT=8000
+MCP_TRANSPORT=streamable-http
+SECRETS_FILE=secrets.json
+```
+
+### Secrets handling
+
+- If a `secrets.json` file exists at startup, it is loaded automatically.
+- Log output redacts sensitive data (passwords/tokens, credentials in URIs).
+
+### Tool responses
+
+All tools return a standardized envelope:
+
+```json
+{ "ok": true, "...": "..." }
+```
+
+Errors follow:
+
+```json
+{ "ok": false, "error": { "message": "...", "code": "..." } }
+```
 
 ## Connecting from Local Browser
 

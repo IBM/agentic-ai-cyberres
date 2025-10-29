@@ -1,3 +1,6 @@
+#
+# Copyright contributors to the agentic-ai-cyberres project
+#
 [project]
 name = "cyberres-mcp"
 version = "0.1.0"
@@ -8,10 +11,13 @@ dependencies = [
     "fastapi>=0.115.14",
     "fastmcp>=2.10.6",
     "mcp[cli]>=1.10.1",
+    "oracledb>=3.3.0",
     "paramiko>=3.5.1",
     "pydantic>=2.11.7",
+    "pymongo>=4.14.1",
     "requests>=2.32.4",
     "uvicorn>=0.35.0",
+    "python-dotenv>=1.0.1",
 ]
 
 [dependency-groups]
@@ -19,5 +25,15 @@ dev = [
     "cyberres-mcp",
 ]
 
+[project.scripts]
+cyberres-mcp = "cyberres_mcp.server:main"
+
 [tool.uv.sources]
 cyberres-mcp = { workspace = true }
+
+[tool.uv.workspace]
+members = [
+    ".",
+    ".",
+    ".",
+]
