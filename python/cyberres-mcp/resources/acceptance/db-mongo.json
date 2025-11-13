@@ -1,0 +1,6 @@
+{
+  "require_connect": true,
+  "replication": {
+    "allowed_states": [1, 2]
+  }
+}

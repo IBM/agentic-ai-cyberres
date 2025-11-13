@@ -130,3 +130,8 @@ dist
 .pnp.*
 
 python/cyberres-mcp/.venv/*
+python/cyberres-mcp/.venv/*
+
+python/cyberres-mcp/__pycache__/*
+python/cyberres-mcp/plugins/__pycache__/
+secrets.config.json
