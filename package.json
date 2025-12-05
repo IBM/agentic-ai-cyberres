@@ -23,10 +23,14 @@
     "beeai-framework": "^0.1.6",
     "dotenv": "^16.4.5",
     "groq-sdk": "^0.7.0",
+    "jsondiffpatch": "^0.7.2",
     "ollama": "^0.5.11",
     "openai": "^4.77.0",
     "openai-chat-tokens": "^0.2.8",
     "pino-pretty": "^11.2.2",
     "strip-ansi": "^7.1.0"
+  },
+  "overrides": {
+    "jsondiffpatch": "^0.7.2"
   }
 }
