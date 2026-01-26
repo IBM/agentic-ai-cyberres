@@ -1,0 +1,5 @@
+{
+  "fs_max_pct": 85,
+  "mem_min_free_pct": 10,
+  "required_services": []
+}
