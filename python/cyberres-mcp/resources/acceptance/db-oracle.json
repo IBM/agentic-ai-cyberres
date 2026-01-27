@@ -1,0 +1,4 @@
+{
+  "tablespace_min_free_pct": 15,
+  "require_connect": true
+}

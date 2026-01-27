@@ -1,0 +1,4 @@
+Summarize the validation session in two sections:
+
+* **Executive summary**: Provide up to 10 bullet points describing the overall health of the target. Focus on key outcomes such as whether the host is reachable, services are running, the database is open and in the correct role, tablespaces have adequate free space, or MongoDB replica set is healthy.
+* **Technician details**: Present a table (or list) of each tool executed, its status (PASS/FAIL), and a one-sentence explanation of the result. Include pointers to evidence such as filesystem usage numbers, memory percentages, DB open mode, or replica set state.
