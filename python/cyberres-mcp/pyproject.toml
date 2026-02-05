@@ -20,20 +20,9 @@ dependencies = [
     "python-dotenv>=1.0.1",
 ]
 
-[dependency-groups]
-dev = [
-    "cyberres-mcp",
-]
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project.scripts]
 cyberres-mcp = "cyberres_mcp.server:main"
-
-[tool.uv.sources]
-cyberres-mcp = { workspace = true }
-
-[tool.uv.workspace]
-members = [
-    ".",
-    ".",
-    ".",
-]

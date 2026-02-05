@@ -207,7 +207,7 @@ wheels = [
 [[package]]
 name = "cyberres-mcp"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "fastmcp" },
@@ -219,11 +219,6 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "requests" },
     { name = "uvicorn" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "cyberres-mcp" },
 ]
 
 [package.metadata]
@@ -239,9 +234,6 @@ requires-dist = [
     { name = "requests", specifier = ">=2.32.4" },
     { name = "uvicorn", specifier = ">=0.35.0" },
 ]
-
-[package.metadata.requires-dev]
-dev = [{ name = "cyberres-mcp", virtual = "." }]
 
 [[package]]
 name = "cyclopts"

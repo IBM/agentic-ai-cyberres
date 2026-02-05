@@ -8,8 +8,8 @@ import os
 import json
 import logging
 import re
-from settings import SETTINGS
-from plugins import vms_validator, oracle_db, mongo_db, net
+from .settings import SETTINGS
+from .plugins import vms_validator, oracle_db, mongo_db, net
 
 
 def create_app() -> FastMCP:
@@ -80,6 +80,164 @@ def create_app() -> FastMCP:
             "replica status."
         ),
     )
+
+    # Add health check tool
+    @app.tool()
+    def server_health() -> dict:
+        """Check MCP server health and list available capabilities.
+        
+        Returns server status, version, and counts of available tools,
+        resources, and prompts. Useful for verifying server connectivity
+        and discovering capabilities.
+        
+        Example:
+            >>> server_health()
+            {
+                "ok": true,
+                "status": "healthy",
+                "version": "0.1.0",
+                "plugins": ["network", "vm_linux", "oracle_db", "mongodb"],
+                "capabilities": {
+                    "tools": 13,
+                    "resources": 3,
+                    "prompts": 3
+                }
+            }
+        """
+        from .plugins.utils import ok
+        
+        return ok({
+            "status": "healthy",
+            "version": "0.1.0",
+            "plugins": ["network", "vm_linux", "oracle_db", "mongodb"],
+            "capabilities": {
+                "tools": 19,
+                "resources": 3,
+                "prompts": 3
+            },
+            "description": "Recovery validation MCP server for infrastructure health checks. Now includes 4 tools to access resources and prompts."
+        })
+
+    # Add tools to access resources and prompts
+    @app.tool()
+    def list_resources() -> dict:
+        """List all available acceptance criteria resources.
+        
+        Returns a list of available resource URIs and their descriptions.
+        These resources define acceptance criteria for validation.
+        """
+        from .plugins.utils import ok
+        
+        return ok({
+            "resources": [
+                {
+                    "uri": "resource://acceptance/vm-core",
+                    "name": "VM Core Acceptance Criteria",
+                    "description": "Defines thresholds for Linux VM health validation including filesystem usage, memory, and required services"
+                },
+                {
+                    "uri": "resource://acceptance/db-oracle",
+                    "name": "Oracle Database Acceptance Criteria",
+                    "description": "Defines criteria for Oracle database validation including tablespace usage and connection requirements"
+                },
+                {
+                    "uri": "resource://acceptance/db-mongo",
+                    "name": "MongoDB Acceptance Criteria",
+                    "description": "Defines criteria for MongoDB cluster validation including replica set health and replication lag"
+                }
+            ]
+        })
+    
+    @app.tool()
+    def get_resource(resource_uri: str) -> dict:
+        """Get the content of a specific acceptance criteria resource.
+        
+        Args:
+            resource_uri: The URI of the resource (e.g., "resource://acceptance/vm-core")
+        
+        Returns:
+            The resource content as JSON
+        """
+        from .plugins.utils import ok, err
+        
+        resource_map = {
+            "resource://acceptance/vm-core": "vm-core.json",
+            "resource://acceptance/db-oracle": "db-oracle.json",
+            "resource://acceptance/db-mongo": "db-mongo.json"
+        }
+        
+        if resource_uri not in resource_map:
+            return err(f"Unknown resource: {resource_uri}", code="RESOURCE_NOT_FOUND")
+        
+        try:
+            filename = resource_map[resource_uri]
+            filepath = os.path.join(resource_dir, filename)
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = json.load(f)
+            return ok({
+                "uri": resource_uri,
+                "content": content
+            })
+        except FileNotFoundError:
+            return err(f"Resource file not found: {filename}", code="FILE_NOT_FOUND")
+        except Exception as e:
+            return err(f"Failed to load resource: {str(e)}", code="RESOURCE_ERROR")
+    
+    @app.tool()
+    def list_prompts() -> dict:
+        """List all available prompt templates.
+        
+        Returns a list of available prompts and their descriptions.
+        These prompts guide AI assistants in performing complex validation workflows.
+        """
+        from .plugins.utils import ok
+        
+        return ok({
+            "prompts": [
+                {
+                    "name": "planner",
+                    "description": "Creates structured validation plans with phases, steps, and time estimates"
+                },
+                {
+                    "name": "evaluator",
+                    "description": "Evaluates validation results against acceptance criteria and provides pass/fail assessment"
+                },
+                {
+                    "name": "summarizer",
+                    "description": "Generates executive summaries of validation results with key findings and recommendations"
+                }
+            ]
+        })
+    
+    @app.tool()
+    def get_prompt(prompt_name: str) -> dict:
+        """Get the content of a specific prompt template.
+        
+        Args:
+            prompt_name: The name of the prompt (e.g., "planner", "evaluator", "summarizer")
+        
+        Returns:
+            The prompt template content
+        """
+        from .plugins.utils import ok, err
+        
+        valid_prompts = ["planner", "evaluator", "summarizer"]
+        
+        if prompt_name not in valid_prompts:
+            return err(f"Unknown prompt: {prompt_name}. Valid prompts: {', '.join(valid_prompts)}", code="PROMPT_NOT_FOUND")
+        
+        try:
+            filepath = os.path.join(prompt_dir, f"{prompt_name}.md")
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+            return ok({
+                "name": prompt_name,
+                "content": content
+            })
+        except FileNotFoundError:
+            return err(f"Prompt file not found: {prompt_name}.md", code="FILE_NOT_FOUND")
+        except Exception as e:
+            return err(f"Failed to load prompt: {str(e)}", code="PROMPT_ERROR")
 
     # Attach plugin tool functions. Each plugin exposes its own attach() with @app.tool decorations.
     net.attach(app)
