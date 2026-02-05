@@ -177,17 +177,6 @@ All tools return a standardized envelope:
   }
 }
 
-## 🔒 Security: Client-Side Credentials
-
-**Important**: This MCP server follows security best practices by **NOT storing credentials**. All credentials must be provided by the client at request time.
-
-### Why This Approach?
-
-- ✅ No credentials stored on disk
-- ✅ Each request uses only necessary credentials
-- ✅ Easy credential rotation
-- ✅ Reduced attack surface
-- ✅ Compliance with security standards
 
 ### How to Provide Credentials
 
@@ -204,7 +193,6 @@ Credentials are passed as parameters in each tool call:
 }
 ```
 
-**See [`CREDENTIALS_GUIDE.md`](CREDENTIALS_GUIDE.md) for complete security best practices.**
 
 ---
 
@@ -223,7 +211,7 @@ Credentials are passed as parameters in each tool call:
         "--directory",
         "/path/to/cyberres-mcp",
         "run",
-        "server.py"
+        "cyberres-mcp"
       ],
       "env": {
         "MCP_TRANSPORT": "stdio"
@@ -242,7 +230,7 @@ Credentials are passed as parameters in each tool call:
 Simply ask Claude in natural language:
 
 ```
-Please validate the VM at 10.0.1.5 using username "admin" and password "secret123".
+Please validate the VM at 10.0.1.5 
 Check uptime, memory, disk usage, and verify sshd and nginx are running.
 ```
 
@@ -251,7 +239,6 @@ Claude will automatically:
 - Chain multiple validations
 - Provide a comprehensive summary
 
-**See [`CLAUDE_DESKTOP_SETUP.md`](CLAUDE_DESKTOP_SETUP.md) for complete integration guide.**
 
 ---
 
@@ -271,7 +258,7 @@ In the MCP Inspector:
 1. Set transport to **`streamable-http`**
 2. Enter server URL: `http://<server-ip>:8000/mcp`
    - Local: `http://localhost:8000/mcp`
-   - Remote: `http://10.0.1.5:8000/mcp`
+
 3. Click **Connect**
 
 ### 3. Verify Connection
@@ -328,7 +315,6 @@ Test the connection:
 }
 ```
 
-See [`demo/tool-examples.md`](demo/tool-examples.md) for comprehensive examples.
 
 ## 🎯 Demo Scenarios
 
