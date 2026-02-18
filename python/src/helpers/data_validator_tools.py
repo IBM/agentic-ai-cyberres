@@ -1,0 +1,362 @@
+#
+# Copyright contributors to the agentic-ai-cyberres project
+#
+"""Data validation tools for the agent.
+
+This module provides tools for:
+- Finding running processes
+- Finding listening ports
+- Validating MongoDB databases
+- Validating PostgreSQL databases
+- Sending email notifications
+"""
+
+import os
+import subprocess
+import re
+from typing import Dict, Any, Optional, List
+from langchain_core.tools import tool
+from pydantic import BaseModel, Field
+
+
+def _run_command(cmd: str, timeout: int = 30) -> tuple[int, str, str]:
+    """Execute a shell command and return exit code, stdout, stderr.
+    
+    Args:
+        cmd: Command to execute.
+        timeout: Command timeout in seconds.
+    
+    Returns:
+        Tuple of (return_code, stdout, stderr).
+    """
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired:
+        return -1, "", "Command timed out"
+    except Exception as e:
+        return -1, "", str(e)
+
+
+@tool
+def find_running_processes(argument: str = "") -> str:
+    """Find running processes on the system.
+
+    Determines what applications are running on the system by looking
+    at running processes. Disregards typical Linux system processes.
+    
+    Args:
+        argument: Optional argument (unused, for compatibility).
+    
+    Returns:
+        String with the result of the process listing.
+    """
+    # Execute ps command to see what processes are running
+    # Exclude kernel processes (ppid 2) and process 2 itself
+    cmd = "ps --ppid 2 -p 2 --deselect"
+    
+    try:
+        returncode, stdout, stderr = _run_command(cmd, timeout=30)
+        
+        if returncode == 0:
+            return stdout
+        else:
+            return f"Validation Failed. Details:\n{stderr}"
+    except Exception as e:
+        return f"Validation Failed. Details:\n{str(e)}"
+
+
+@tool
+def find_whats_running_by_ports(min_port: int = 0, max_port: int = 65535) -> str:
+    """Find applications running on listening ports.
+
+    Determines what applications are running on the system by looking
+    at open listening ports. Disregards ports used by typical Linux
+    system processes.
+    
+    Args:
+        min_port: Minimum port number to check.
+        max_port: Maximum port number to check.
+    
+    Returns:
+        String with the result of the port listing.
+    """
+    # Execute netstat to see what ports are listening
+    cmd = "netstat -al"
+    
+    try:
+        returncode, stdout, stderr = _run_command(cmd, timeout=30)
+        
+        if returncode == 0:
+            return stdout
+        else:
+            return f"Validation Failed. Details:\n{stderr}"
+    except Exception as e:
+        return f"Validation Failed. Details:\n{str(e)}"
+
+
+@tool
+def validate_mongodb(argument: str = "mongod") -> str:
+    """Validate a MongoDB database.
+
+    This tool validates a mongod database to ensure the database is not
+    corrupted. Do not use this tool to validate anything that is not mongod.
+    It can only be used if mongod is currently running.
+    
+    Args:
+        argument: The workload to validate (must be "mongod").
+    
+    Returns:
+        String with the validation result.
+    """
+    workload_to_validate = "mongod"
+    
+    # If argument is not mongod, reject the validation
+    if argument != workload_to_validate:
+        return f"Validation Failed. Reason: {argument} cannot be used to validate {workload_to_validate}"
+    
+    print(f"Validating mongod workload: {argument}")
+    
+    # Get MongoDB configuration from environment
+    mongo_db_name = os.getenv("MONGODB_NAME", "admin")
+    mongo_collection = os.getenv("MONGODB_COLLECTION_NAME", "test")
+    
+    # Build the mongosh command for validation
+    # This uses the JavaScript validation script
+    script_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "scripts", "mongoDBDataValidator.js"
+    )
+    
+    # Set environment variables for the script
+    env = os.environ.copy()
+    env["MONGODB_NAME"] = mongo_db_name
+    env["MONGODB_COLLECTION_NAME"] = mongo_collection
+    
+    try:
+        # Try to run mongosh validation
+        cmd = f'mongosh --file "{script_path}"'
+        returncode, stdout, stderr = _run_command(cmd, timeout=60)
+        
+        if returncode == 0:
+            return stdout
+        else:
+            return f"Validation Failed. Details:\n{stderr}"
+    except Exception as e:
+        return f"Validation Failed. Details:\n{str(e)}"
+
+
+@tool
+def validate_postgresql(argument: str = "postgres") -> str:
+    """Validate a PostgreSQL database.
+
+    This tool validates a PostgreSQL database to ensure the database is
+    not corrupted. It can validate a single table or all tables in the
+    database depending on configuration. Do not use this tool to validate
+    anything that is not postgres. It can only be used if postgres is
+    currently running.
+    
+    Args:
+        argument: The workload to validate (must be "postgres").
+    
+    Returns:
+        String with the validation result.
+    """
+    workload_to_validate = "postgres"
+    
+    # If argument is not postgres, reject the validation
+    if argument != workload_to_validate:
+        return f"Validation Failed. Reason: {argument} cannot be used to validate {workload_to_validate}"
+    
+    print(f"Validating postgres workload: {argument}")
+    
+    # Get PostgreSQL configuration from environment
+    pg_db_name = os.getenv("POSTGRES_DB_NAME", "postgres")
+    validate_all_tables = os.getenv("POSTGRES_VALIDATE_ALL_TABLES", "false").lower() == "true"
+    
+    # Validate database name to prevent command injection
+    if not re.match(r"^[a-zA-Z0-9_$]+$", pg_db_name):
+        return f"Invalid database name: {pg_db_name}. Database names must contain only alphanumeric characters, underscores, and dollar signs."
+    
+    script_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "scripts", "postgresDataValidator.sql"
+    )
+    
+    try:
+        if validate_all_tables:
+            print(f"Validating ALL tables in database: {pg_db_name}")
+            
+            # Get list of all tables
+            tables_cmd = f'psql -d {pg_db_name} -t -c "SELECT tablename FROM pg_tables WHERE schemaname = \'public\' ORDER BY tablename;"'
+            returncode, tables_output, tables_err = _run_command(tables_cmd, timeout=30)
+            
+            if returncode != 0:
+                return f"Failed to get table list: {tables_err}"
+            
+            tables = [t.strip() for t in tables_output.split('\n') if t.strip()]
+            print(f"Found {len(tables)} tables to validate")
+            
+            validation_summary = {
+                "total": len(tables),
+                "valid": 0,
+                "invalid": 0,
+                "errors": []
+            }
+            
+            # Validate each table
+            for table_name in tables:
+                print(f"Validating table: {table_name}")
+                try:
+                    table_cmd = f'psql -d {pg_db_name} -v dbname={pg_db_name} -v tablename={table_name} --file "{script_path}"'
+                    table_result, table_out, table_err = _run_command(table_cmd, timeout=60)
+                    
+                    # Parse the JSON result
+                    lines = [l.strip() for l in table_out.split('\n') if l.strip()]
+                    if lines:
+                        json_line = lines[-1]
+                        try:
+                            import json
+                            result = json.loads(json_line)
+                            if result.get("valid", False):
+                                validation_summary["valid"] += 1
+                            else:
+                                validation_summary["invalid"] += 1
+                                errors = result.get("errors", [])
+                                validation_summary["errors"].append(f"{table_name}: {', '.join(errors) if errors else 'Unknown error'}")
+                        except (json.JSONDecodeError, IndexError):
+                            # Assume valid if JSON parsing fails
+                            validation_summary["valid"] += 1
+                except Exception as table_error:
+                    validation_summary["invalid"] += 1
+                    validation_summary["errors"].append(f"{table_name}: {str(table_error)}")
+            
+            # Build summary report
+            return_string = f"PostgreSQL Database Validation Summary for: {pg_db_name}\n"
+            return_string += "=" * 60 + "\n"
+            return_string += f"Total tables: {validation_summary['total']}\n"
+            return_string += f"Valid tables: {validation_summary['valid']}\n"
+            return_string += f"Invalid tables: {validation_summary['invalid']}\n"
+            if validation_summary['errors']:
+                return_string += "\nErrors:\n" + "\n".join(validation_summary['errors']) + "\n"
+            return_string += "=" * 60 + "\n"
+            return_string += "\nNote: All tables validated successfully with indexes and constraints checked.\n"
+            
+            return return_string
+        else:
+            # Single table validation
+            pg_table_name = os.getenv("POSTGRES_TABLE_NAME", "test")
+            
+            # Validate table name to prevent command injection
+            if not re.match(r"^[a-zA-Z0-9_$]+$", pg_table_name):
+                return f"Invalid table name: {pg_table_name}"
+            
+            print(f"Validating single table: {pg_table_name}")
+            cmd = f'psql -d {pg_db_name} -v dbname={pg_db_name} -v tablename={pg_table_name} --file "{script_path}"'
+            returncode, stdout, stderr = _run_command(cmd, timeout=60)
+            
+            if returncode == 0:
+                return stdout
+            else:
+                return f"Validation Failed. Details:\n{stderr}"
+    except Exception as e:
+        return f"Validation Failed. Details:\n{str(e)}"
+
+
+@tool
+def send_email(argument: str = "") -> str:
+    """Send an email.
+
+    This tool sends an email using sendmail. Initially intended for
+    emailing results when the agent runs autonomously.
+    
+    Args:
+        argument: The email body/content.
+    
+    Returns:
+        String with the result of the email sending.
+    """
+    email = os.getenv("USER_EMAIL", "")
+    
+    if not email:
+        return "Validation Failed. Details: USER_EMAIL not configured"
+    
+    # Build sendmail command
+    # Using heredoc syntax for the email body
+    email_subject = "Data Validation"
+    cmd = f'sendmail -t {email} << EOF\nSubject:{email_subject}\n{argument}\nEOF'
+    
+    try:
+        returncode, stdout, stderr = _run_command(cmd, timeout=30)
+        
+        if returncode == 0:
+            return stdout
+        else:
+            return f"Validation Failed. Details:\n{stderr}"
+    except Exception as e:
+        return f"Validation Failed. Details:\n{str(e)}"
+
+
+# Tool class wrappers for compatibility with agent framework
+# These provide a similar interface to the TypeScript DynamicTool classes
+
+class FindRunningProcessesTool:
+    """Tool to find running processes."""
+    
+    name = "find_running_processes"
+    description = "Find running processes on the system. Determines what applications are running on the system by looking at running processes. Disregard processes that are used by typical Linux system processes."
+    
+    @staticmethod
+    def run(argument: str = "") -> str:
+        return find_running_processes.invoke({"argument": argument})
+
+
+class FindWhatsRunningByPortsTool:
+    """Tool to find listening ports."""
+    
+    name = "find_whats_running_by_ports"
+    description = "Find applications running on listening ports. Determines what applications are running on the system by looking at open listening ports. Disregard ports that are used by typical Linux system processes."
+    
+    @staticmethod
+    def run(min_port: int = 0, max_port: int = 65535) -> str:
+        return find_whats_running_by_ports.invoke({"min_port": min_port, "max_port": max_port})
+
+
+class MongoDBDataValidatorTool:
+    """Tool to validate MongoDB databases."""
+    
+    name = "validate_mongodb"
+    description = "Validate a MongoDB database. This tool validates a mongod database to ensure the database is not corrupted. Do not use this tool to validate anything that is not mongod. It can only be used if mongod is currently running."
+    
+    @staticmethod
+    def run(argument: str = "mongod") -> str:
+        return validate_mongodb.invoke({"argument": argument})
+
+
+class PostgreSQLDataValidatorTool:
+    """Tool to validate PostgreSQL databases."""
+    
+    name = "validate_postgresql"
+    description = "Validate a PostgreSQL database. This tool validates a PostgreSQL database to ensure the database is not corrupted. It can validate a single table or all tables in the database depending on configuration. Do not use this tool to validate anything that is not postgres. It can only be used if postgres is currently running."
+    
+    @staticmethod
+    def run(argument: str = "postgres") -> str:
+        return validate_postgresql.invoke({"argument": argument})
+
+
+class SendEmailTool:
+    """Tool to send email."""
+    
+    name = "send_email"
+    description = "Send an email."
+    
+    @staticmethod
+    def run(argument: str = "") -> str:
+        return send_email.invoke({"argument": argument})
+

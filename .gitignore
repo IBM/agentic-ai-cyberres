@@ -131,6 +131,7 @@ dist
 
 python/cyberres-mcp/.venv/*
 python/cyberres-mcp/.venv/*
+python/.venv/*
 
 python/cyberres-mcp/__pycache__/*
 python/cyberres-mcp/plugins/__pycache__/
