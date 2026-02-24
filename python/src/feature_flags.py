@@ -19,6 +19,7 @@ class FeatureFlags:
     
     # Default flag values
     DEFAULT_FLAGS = {
+        # Phase 1 flags
         'use_new_orchestrator': False,
         'use_tool_coordinator': True,
         'use_state_management': True,
@@ -30,6 +31,16 @@ class FeatureFlags:
         'enable_tool_caching': True,
         'enable_retry_logic': True,
         'enable_execution_history': True,
+        
+        # Phase 2 flags - Enhanced Agent Features
+        'parallel_tool_execution': False,  # Execute tools in parallel
+        'ai_classification': False,        # Use AI for classification
+        'ai_reporting': False,             # Use AI for report generation
+        'ai_plan_optimization': False,     # Use AI to optimize plans
+        'auto_resume_workflows': False,    # Auto-resume failed workflows
+        'batch_validations': False,        # Batch multiple validations
+        'lazy_discovery': False,           # Only discover when needed
+        'enhanced_error_recovery': True,   # Enhanced error recovery
     }
     
     def __init__(self, config: Optional[Dict[str, bool]] = None):

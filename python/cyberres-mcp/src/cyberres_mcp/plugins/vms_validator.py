@@ -4,9 +4,10 @@ Copyright contributors to the agentic-ai-cyberres project
 """
 
 from typing import List, Optional, Dict, Any
-from paramiko import SSHClient, AutoAddPolicy
-import paramiko
 import logging
+
+# Use unified SSH utilities
+from .ssh_utils import ssh_exec as _ssh_exec_impl
 
 def _ssh_exec(host: str,
               username: str,
@@ -15,25 +16,12 @@ def _ssh_exec(host: str,
               cmd: str = "echo ok",
               port: int = 22,
               timeout: float = 5.0) -> tuple[int, str, str]:
-    """Execute a command over SSH and return exit code, stdout, stderr."""
-    client = SSHClient()
-    client.set_missing_host_key_policy(AutoAddPolicy())
-    try:
-        if key_path:
-            key = paramiko.RSAKey.from_private_key_file(key_path)
-            client.connect(hostname=host, port=port, username=username, pkey=key, timeout=timeout)
-        else:
-            client.connect(hostname=host, port=port, username=username, password=password, timeout=timeout)
-        stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
-        out = stdout.read().decode()
-        err = stderr.read().decode()
-        rc = stdout.channel.recv_exit_status()
-        return rc, out, err
-    finally:
-        try:
-            client.close()
-        except Exception:
-            pass
+    """
+    Execute a command over SSH and return exit code, stdout, stderr.
+    
+    This is a backward-compatible wrapper around ssh_utils.ssh_exec.
+    """
+    return _ssh_exec_impl(host, username, cmd, password, key_path, port, timeout)
 
 
 def _parse_df_posix(df_output: str) -> List[Dict[str, Any]]:

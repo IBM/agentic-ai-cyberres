@@ -1,0 +1,462 @@
+{
+  "version": "1.0.0",
+  "last_updated": "2026-02-11",
+  "applications": [
+    {
+      "name": "Oracle Database",
+      "category": "database",
+      "vendor": "Oracle",
+      "process_patterns": [
+        "ora_pmon_.*",
+        "ora_smon_.*",
+        "ora_.*_.*",
+        "tnslsnr",
+        "oracle.*"
+      ],
+      "port_patterns": [
+        1521,
+        1522,
+        1526,
+        1529
+      ],
+      "config_paths": [
+        "/u01/app/oracle/product/*/network/admin/tnsnames.ora",
+        "/etc/oratab",
+        "/opt/oracle/product/*/network/admin/tnsnames.ora"
+      ],
+      "version_commands": [
+        "sqlplus -version",
+        "cat /etc/oratab | grep -v '^#' | cut -d: -f2"
+      ],
+      "version_patterns": [
+        "Oracle Database (\\d+[cg]?) Release ([\\d.]+)",
+        "Version ([\\d.]+)"
+      ]
+    },
+    {
+      "name": "PostgreSQL",
+      "category": "database",
+      "vendor": "PostgreSQL Global Development Group",
+      "process_patterns": [
+        "postgres:",
+        "postmaster",
+        "/usr/lib/postgresql/.*/bin/postgres",
+        "/usr/pgsql-.*/bin/postgres"
+      ],
+      "port_patterns": [
+        5432,
+        5433,
+        5434
+      ],
+      "config_paths": [
+        "/etc/postgresql/*/main/postgresql.conf",
+        "/var/lib/pgsql/*/data/postgresql.conf",
+        "/usr/local/pgsql/data/postgresql.conf"
+      ],
+      "version_commands": [
+        "postgres --version",
+        "psql --version"
+      ],
+      "version_patterns": [
+        "postgres \\(PostgreSQL\\) ([\\d.]+)",
+        "psql \\(PostgreSQL\\) ([\\d.]+)"
+      ]
+    },
+    {
+      "name": "MySQL",
+      "category": "database",
+      "vendor": "Oracle",
+      "process_patterns": [
+        "mysqld",
+        "/usr/sbin/mysqld",
+        "/usr/libexec/mysqld"
+      ],
+      "port_patterns": [
+        3306,
+        3307
+      ],
+      "config_paths": [
+        "/etc/my.cnf",
+        "/etc/mysql/my.cnf",
+        "/usr/local/mysql/my.cnf"
+      ],
+      "version_commands": [
+        "mysqld --version",
+        "mysql --version"
+      ],
+      "version_patterns": [
+        "Ver ([\\d.]+)",
+        "Distrib ([\\d.]+)"
+      ]
+    },
+    {
+      "name": "Microsoft SQL Server",
+      "category": "database",
+      "vendor": "Microsoft",
+      "process_patterns": [
+        "sqlservr",
+        "/opt/mssql/bin/sqlservr"
+      ],
+      "port_patterns": [
+        1433,
+        1434
+      ],
+      "config_paths": [
+        "/var/opt/mssql/mssql.conf"
+      ],
+      "version_commands": [
+        "/opt/mssql/bin/sqlservr --version"
+      ],
+      "version_patterns": [
+        "Microsoft SQL Server ([\\d.]+)"
+      ]
+    },
+    {
+      "name": "MongoDB",
+      "category": "database",
+      "vendor": "MongoDB Inc.",
+      "process_patterns": [
+        "mongod",
+        "/usr/bin/mongod"
+      ],
+      "port_patterns": [
+        27017,
+        27018,
+        27019
+      ],
+      "config_paths": [
+        "/etc/mongod.conf",
+        "/etc/mongodb.conf"
+      ],
+      "version_commands": [
+        "mongod --version"
+      ],
+      "version_patterns": [
+        "db version v([\\d.]+)"
+      ]
+    },
+    {
+      "name": "Redis",
+      "category": "cache",
+      "vendor": "Redis Ltd.",
+      "process_patterns": [
+        "redis-server",
+        "/usr/bin/redis-server"
+      ],
+      "port_patterns": [
+        6379,
+        6380
+      ],
+      "config_paths": [
+        "/etc/redis/redis.conf",
+        "/etc/redis.conf"
+      ],
+      "version_commands": [
+        "redis-server --version"
+      ],
+      "version_patterns": [
+        "Redis server v=([\\d.]+)"
+      ]
+    },
+    {
+      "name": "Memcached",
+      "category": "cache",
+      "vendor": "Memcached",
+      "process_patterns": [
+        "memcached",
+        "/usr/bin/memcached"
+      ],
+      "port_patterns": [
+        11211,
+        11212
+      ],
+      "config_paths": [
+        "/etc/memcached.conf"
+      ],
+      "version_commands": [
+        "memcached -h | grep version"
+      ],
+      "version_patterns": [
+        "memcached ([\\d.]+)"
+      ]
+    },
+    {
+      "name": "Apache HTTP Server",
+      "category": "web_server",
+      "vendor": "Apache Software Foundation",
+      "process_patterns": [
+        "httpd",
+        "apache2",
+        "/usr/sbin/httpd",
+        "/usr/sbin/apache2"
+      ],
+      "port_patterns": [
+        80,
+        443,
+        8080,
+        8443
+      ],
+      "config_paths": [
+        "/etc/httpd/conf/httpd.conf",
+        "/etc/apache2/apache2.conf",
+        "/usr/local/apache2/conf/httpd.conf"
+      ],
+      "version_commands": [
+        "httpd -v",
+        "apache2 -v"
+      ],
+      "version_patterns": [
+        "Apache/([\\d.]+)"
+      ]
+    },
+    {
+      "name": "Nginx",
+      "category": "web_server",
+      "vendor": "Nginx Inc.",
+      "process_patterns": [
+        "nginx:",
+        "/usr/sbin/nginx"
+      ],
+      "port_patterns": [
+        80,
+        443,
+        8080,
+        8443
+      ],
+      "config_paths": [
+        "/etc/nginx/nginx.conf",
+        "/usr/local/nginx/conf/nginx.conf"
+      ],
+      "version_commands": [
+        "nginx -v"
+      ],
+      "version_patterns": [
+        "nginx/([\\d.]+)"
+      ]
+    },
+    {
+      "name": "Apache Tomcat",
+      "category": "app_server",
+      "vendor": "Apache Software Foundation",
+      "process_patterns": [
+        "org.apache.catalina.startup.Bootstrap",
+        "catalina",
+        "tomcat"
+      ],
+      "port_patterns": [
+        8080,
+        8443,
+        8009
+      ],
+      "config_paths": [
+        "/opt/tomcat/conf/server.xml",
+        "/usr/share/tomcat*/conf/server.xml",
+        "/var/lib/tomcat*/conf/server.xml"
+      ],
+      "version_commands": [
+        "catalina.sh version",
+        "/opt/tomcat/bin/version.sh"
+      ],
+      "version_patterns": [
+        "Apache Tomcat/([\\d.]+)"
+      ]
+    },
+    {
+      "name": "Oracle WebLogic",
+      "category": "app_server",
+      "vendor": "Oracle",
+      "process_patterns": [
+        "weblogic.Server",
+        "weblogic.NodeManager"
+      ],
+      "port_patterns": [
+        7001,
+        7002,
+        7003,
+        9001,
+        9002
+      ],
+      "config_paths": [
+        "/u01/oracle/user_projects/domains/*/config/config.xml",
+        "/opt/oracle/middleware/user_projects/domains/*/config/config.xml"
+      ],
+      "version_commands": [
+        "java weblogic.version"
+      ],
+      "version_patterns": [
+        "WebLogic Server ([\\d.]+)"
+      ]
+    },
+    {
+      "name": "IBM WebSphere",
+      "category": "app_server",
+      "vendor": "IBM",
+      "process_patterns": [
+        "com.ibm.ws.runtime.WsServer",
+        "websphere"
+      ],
+      "port_patterns": [
+        9060,
+        9080,
+        9443
+      ],
+      "config_paths": [
+        "/opt/IBM/WebSphere/AppServer/profiles/*/config/cells/*/nodes/*/servers/*/server.xml"
+      ],
+      "version_commands": [
+        "versionInfo.sh"
+      ],
+      "version_patterns": [
+        "Version ([\\d.]+)"
+      ]
+    },
+    {
+      "name": "JBoss/WildFly",
+      "category": "app_server",
+      "vendor": "Red Hat",
+      "process_patterns": [
+        "jboss",
+        "wildfly",
+        "org.jboss.as.standalone"
+      ],
+      "port_patterns": [
+        8080,
+        8443,
+        9990,
+        9999
+      ],
+      "config_paths": [
+        "/opt/jboss/standalone/configuration/standalone.xml",
+        "/opt/wildfly/standalone/configuration/standalone.xml"
+      ],
+      "version_commands": [
+        "jboss-cli.sh --version"
+      ],
+      "version_patterns": [
+        "JBoss AS ([\\d.]+)",
+        "WildFly ([\\d.]+)"
+      ]
+    },
+    {
+      "name": "RabbitMQ",
+      "category": "message_queue",
+      "vendor": "VMware",
+      "process_patterns": [
+        "rabbitmq-server",
+        "beam.smp.*rabbitmq"
+      ],
+      "port_patterns": [
+        5672,
+        15672,
+        25672
+      ],
+      "config_paths": [
+        "/etc/rabbitmq/rabbitmq.conf"
+      ],
+      "version_commands": [
+        "rabbitmqctl version"
+      ],
+      "version_patterns": [
+        "([\\d.]+)"
+      ]
+    },
+    {
+      "name": "Apache Kafka",
+      "category": "message_queue",
+      "vendor": "Apache Software Foundation",
+      "process_patterns": [
+        "kafka.Kafka",
+        "kafka-server-start"
+      ],
+      "port_patterns": [
+        9092,
+        9093
+      ],
+      "config_paths": [
+        "/opt/kafka/config/server.properties",
+        "/etc/kafka/server.properties"
+      ],
+      "version_commands": [
+        "kafka-server-start.sh --version"
+      ],
+      "version_patterns": [
+        "([\\d.]+)"
+      ]
+    },
+    {
+      "name": "Elasticsearch",
+      "category": "search_engine",
+      "vendor": "Elastic",
+      "process_patterns": [
+        "org.elasticsearch.bootstrap.Elasticsearch",
+        "elasticsearch"
+      ],
+      "port_patterns": [
+        9200,
+        9300
+      ],
+      "config_paths": [
+        "/etc/elasticsearch/elasticsearch.yml",
+        "/usr/share/elasticsearch/config/elasticsearch.yml"
+      ],
+      "version_commands": [
+        "curl -s http://localhost:9200 | grep version"
+      ],
+      "version_patterns": [
+        "\"number\" : \"([\\d.]+)\""
+      ]
+    },
+    {
+      "name": "Docker",
+      "category": "container",
+      "vendor": "Docker Inc.",
+      "process_patterns": [
+        "dockerd",
+        "docker-containerd"
+      ],
+      "port_patterns": [
+        2375,
+        2376
+      ],
+      "config_paths": [
+        "/etc/docker/daemon.json"
+      ],
+      "version_commands": [
+        "docker --version"
+      ],
+      "version_patterns": [
+        "Docker version ([\\d.]+)"
+      ]
+    },
+    {
+      "name": "Kubernetes",
+      "category": "orchestration",
+      "vendor": "Cloud Native Computing Foundation",
+      "process_patterns": [
+        "kube-apiserver",
+        "kube-controller-manager",
+        "kube-scheduler",
+        "kubelet",
+        "kube-proxy"
+      ],
+      "port_patterns": [
+        6443,
+        8080,
+        10250,
+        10251,
+        10252
+      ],
+      "config_paths": [
+        "/etc/kubernetes/manifests/kube-apiserver.yaml",
+        "/var/lib/kubelet/config.yaml"
+      ],
+      "version_commands": [
+        "kubectl version --short",
+        "kubelet --version"
+      ],
+      "version_patterns": [
+        "v([\\d.]+)"
+      ]
+    }
+  ]
+}

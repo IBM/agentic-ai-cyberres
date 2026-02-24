@@ -3,13 +3,13 @@
 # Copyright contributors to the agentic-ai-cyberres project
 #
 from __future__ import annotations
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 import os
 import json
 import logging
 import re
 from .settings import SETTINGS
-from .plugins import vms_validator, oracle_db, mongo_db, net
+from .plugins import vms_validator, oracle_db, mongo_db, net, workload_discovery
 
 
 def create_app() -> FastMCP:
@@ -71,9 +71,7 @@ def create_app() -> FastMCP:
 
     app = FastMCP(
         "Recovery_Validation_MCP",
-        host=SETTINGS.host,
-        port=SETTINGS.port,
-        description=(
+        instructions=(
             "Validates recovered infrastructure resources including Linux VMs, "
             "Oracle databases, and MongoDB clusters. Exposes tools to check "
             "network connectivity, OS health, database connectivity, and "
@@ -109,13 +107,13 @@ def create_app() -> FastMCP:
         return ok({
             "status": "healthy",
             "version": "0.1.0",
-            "plugins": ["network", "vm_linux", "oracle_db", "mongodb"],
+            "plugins": ["network", "vm_linux", "oracle_db", "mongodb", "workload_discovery"],
             "capabilities": {
-                "tools": 19,
+                "tools": 21,
                 "resources": 3,
                 "prompts": 3
             },
-            "description": "Recovery validation MCP server for infrastructure health checks. Now includes 4 tools to access resources and prompts."
+            "description": "Recovery validation MCP server for infrastructure health checks and workload discovery. Includes tools for OS detection and application discovery."
         })
 
     # Add tools to access resources and prompts
@@ -169,8 +167,8 @@ def create_app() -> FastMCP:
         if resource_uri not in resource_map:
             return err(f"Unknown resource: {resource_uri}", code="RESOURCE_NOT_FOUND")
         
+        filename = resource_map[resource_uri]
         try:
-            filename = resource_map[resource_uri]
             filepath = os.path.join(resource_dir, filename)
             with open(filepath, "r", encoding="utf-8") as f:
                 content = json.load(f)
@@ -244,6 +242,7 @@ def create_app() -> FastMCP:
     vms_validator.attach(app)
     oracle_db.attach(app)
     mongo_db.attach(app)
+    workload_discovery.attach(app)
 
     # Register acceptance profile resources. These JSON files define threshold values.
     resource_dir = os.path.join(os.path.dirname(__file__), "resources", "acceptance")
@@ -329,7 +328,13 @@ def create_app() -> FastMCP:
 def main() -> None:
     """Entry point for running the MCP server."""
     app = create_app()
-    app.run(transport=SETTINGS.transport)
+    
+    # stdio transport doesn't use host/port
+    if SETTINGS.transport == "stdio":
+        app.run(transport="stdio")
+    else:
+        # HTTP transports need host and port
+        app.run(transport=SETTINGS.transport, host=SETTINGS.host, port=SETTINGS.port)
 
 
 if __name__ == "__main__":

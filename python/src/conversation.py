@@ -3,14 +3,15 @@
 #
 """Interactive conversation handler for gathering resource information."""
 
+import os
 import logging
 from typing import Optional, Dict, Any
 from pydantic_ai import Agent
 from pydantic_ai.models import KnownModelName
 from models import (
-    ResourceType, 
-    VMResourceInfo, 
-    OracleDBResourceInfo, 
+    ResourceType,
+    VMResourceInfo,
+    OracleDBResourceInfo,
     MongoDBResourceInfo,
     ConversationState
 )
@@ -18,16 +19,49 @@ from models import (
 logger = logging.getLogger(__name__)
 
 
+def get_llm_model_from_env() -> str:
+    """Get LLM model configuration from environment variables.
+    
+    Returns:
+        Model string in format "backend:model"
+    """
+    backend = os.getenv("LLM_BACKEND", "ollama").lower()
+    
+    if backend == "ollama":
+        # Pydantic AI requires OLLAMA_BASE_URL to be set
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        if not os.getenv("OLLAMA_BASE_URL"):
+            os.environ["OLLAMA_BASE_URL"] = base_url
+        model = os.getenv("OLLAMA_MODEL", "llama3.2")
+        return f"ollama:{model}"
+    elif backend == "openai":
+        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        return f"openai:{model}"
+    elif backend == "groq":
+        model = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
+        return f"groq:{model}"
+    elif backend == "azure":
+        model = os.getenv("AZURE_OPENAI_MODEL", "gpt-4o-mini")
+        return f"azure:{model}"
+    elif backend == "vertexai":
+        model = os.getenv("VERTEXAI_MODEL", "gemini-1.5-flash-001")
+        return f"vertexai:{model}"
+    else:
+        logger.warning(f"Unknown LLM backend '{backend}', defaulting to ollama:llama3.2")
+        return "ollama:llama3.2"
+
+
 class ConversationHandler:
     """Handle interactive conversation to gather resource information."""
     
-    def __init__(self, llm_model: str = "openai:gpt-4o-mini"):
+    def __init__(self, llm_model: Optional[str] = None):
         """Initialize conversation handler.
         
         Args:
-            llm_model: LLM model to use for conversation
+            llm_model: LLM model to use for conversation (if None, reads from env)
         """
-        self.llm_model = llm_model
+        self.llm_model = llm_model or get_llm_model_from_env()
+        logger.info(f"ConversationHandler using LLM model: {self.llm_model}")
         self.state = ConversationState()
     
     def get_initial_prompt(self) -> str:
@@ -82,7 +116,7 @@ You can provide this information in natural language, for example:
         return []
     
     async def parse_initial_input(self, user_input: str) -> Dict[str, Any]:
-        """Parse initial user input to extract resource type and host.
+        """Parse initial user input to extract resource type and host using regex.
         
         Args:
             user_input: User's input text
@@ -90,42 +124,36 @@ You can provide this information in natural language, for example:
         Returns:
             Dictionary with parsed information
         """
-        # Create a simple agent to extract structured data
-        system_prompt = """You are a helpful assistant that extracts structured information from user input.
-        
-Extract the following information:
-- resource_type: One of "vm", "oracle", or "mongodb"
-- host: IP address or hostname
-
-Return the information as a JSON object with these fields.
-If you cannot determine the resource type or host, set them to null.
-"""
-        
-        agent = Agent(
-            self.llm_model,
-            system_prompt=system_prompt,
-            retries=2
-        )
+        import re
         
         try:
-            result = await agent.run(user_input)
-            parsed = result.data
+            # Extract IP address or hostname
+            ip_pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
+            hostname_pattern = r'\b[a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)*\b'
             
-            # Validate and normalize
-            if isinstance(parsed, dict):
-                resource_type_str = parsed.get("resource_type", "").lower()
-                if resource_type_str in ["vm", "linux", "server"]:
-                    parsed["resource_type"] = ResourceType.VM
-                elif resource_type_str in ["oracle", "oracle db", "oracledb"]:
-                    parsed["resource_type"] = ResourceType.ORACLE
-                elif resource_type_str in ["mongodb", "mongo", "mongo db"]:
-                    parsed["resource_type"] = ResourceType.MONGODB
-                else:
-                    parsed["resource_type"] = None
-                
-                return parsed
+            host = None
+            ip_match = re.search(ip_pattern, user_input)
+            if ip_match:
+                host = ip_match.group(0)
+            else:
+                hostname_keywords = r'(?:at|on|host|server|hostname|ip)\s+([a-zA-Z0-9][-a-zA-Z0-9.]*)'
+                hostname_match = re.search(hostname_keywords, user_input, re.IGNORECASE)
+                if hostname_match:
+                    host = hostname_match.group(1)
             
-            return {"resource_type": None, "host": None}
+            # Determine resource type from keywords
+            user_input_lower = user_input.lower()
+            resource_type = None
+            
+            if any(keyword in user_input_lower for keyword in ['vm', 'virtual machine', 'server', 'linux', 'recovered']):
+                resource_type = ResourceType.VM
+            elif any(keyword in user_input_lower for keyword in ['oracle', 'oracle db', 'oracledb']):
+                resource_type = ResourceType.ORACLE
+            elif any(keyword in user_input_lower for keyword in ['mongodb', 'mongo', 'mongo db']):
+                resource_type = ResourceType.MONGODB
+            
+            logger.info(f"Parsed: resource_type={resource_type}, host={host}")
+            return {"resource_type": resource_type, "host": host}
             
         except Exception as e:
             logger.error(f"Error parsing initial input: {e}")

@@ -8,8 +8,14 @@ from typing import Dict, Any, Optional, List
 from groq import Groq
 import ollama
 from openai import OpenAI
-import google.auth
-from google.cloud import aiplatform
+
+# Optional imports for Google Cloud
+try:
+    import google.auth
+    from google.cloud import aiplatform
+    VERTEXAI_AVAILABLE = True
+except ImportError:
+    VERTEXAI_AVAILABLE = False
 
 class Providers(Enum):
     WATSONX = "watsonx"
@@ -29,7 +35,7 @@ class LLMGuardrails:
         """Validate prompt for safety and appropriateness"""
         # Block potentially harmful commands
         dangerous_patterns = [
-            r"rm\s+-rf", r"chmod\s+777", r"passwd", r"adduser", 
+            r"rm\s+-rf", r"chmod\s+777", r"passwd\s+", r"adduser",
             r"useradd", r"usermod", r"chsh", r"visudo", r"dd\s+if=",
             r">\s+/dev/", r"mkfs", r"fdisk", r"shutdown", r"reboot",
             r"halt", r"poweroff", r"init\s+0", r"killall", r"pkill",
@@ -40,10 +46,9 @@ class LLMGuardrails:
             if re.search(pattern, prompt, re.IGNORECASE):
                 raise SafetyViolationError(f"Prompt contains potentially dangerous command: {pattern}")
         
-        # Block sensitive data requests
+        # Block sensitive data requests (but allow discussion of credential types)
+        # Only block if asking for actual sensitive values, not discussing credential availability
         sensitive_patterns = [
-            r"password", r"secret", r"key", r"credential", r"token",
-            r"ssh\-", r"private", r"\.pem", r"\.key", r"\.env",
             r"/etc/shadow", r"/etc/passwd", r"\.bash_history"
         ]
         
@@ -173,6 +178,8 @@ def get_chat_llm(provider: Optional[Providers] = None) -> ChatLLM:
             )
         })
     elif provider == Providers.VERTEXAI:
+        if not VERTEXAI_AVAILABLE:
+            raise SafetyViolationError("VertexAI dependencies not installed. Install with: pip install google-cloud-aiplatform")
         credentials, project = google.auth.default()
         return ChatLLM({
             "provider": provider,

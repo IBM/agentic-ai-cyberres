@@ -16,6 +16,9 @@ from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 import json, shlex
 
+# Use unified SSH utilities
+from .ssh_utils import ssh_exec as _ssh_exec_impl
+
 def run_ssh_command(
     host: str,
     username: str,
@@ -26,43 +29,11 @@ def run_ssh_command(
     timeout: float = 10.0,
 ) -> Tuple[int, str, str]:
     """
-    Minimal SSH exec helper using Paramiko.
-    Returns (return_code, stdout, stderr) with UTF-8 decoded text.
+    Execute SSH command and return (return_code, stdout, stderr).
+    
+    This is a backward-compatible wrapper around ssh_utils.ssh_exec.
     """
-    import paramiko  # lazy import keeps module import-time light
-    from paramiko import SSHClient, AutoAddPolicy
-
-    client = SSHClient()
-    client.set_missing_host_key_policy(AutoAddPolicy())
-
-    try:
-        if key_path:
-            pkey = None
-            # Try Ed25519, then RSA
-            for Key in (paramiko.Ed25519Key, paramiko.RSAKey):
-                try:
-                    pkey = Key.from_private_key_file(key_path)
-                    break
-                except Exception:
-                    pkey = None
-            if pkey:
-                client.connect(hostname=host, port=port, username=username, pkey=pkey, timeout=timeout)
-            else:
-                # Fallback lets Paramiko read the file directly
-                client.connect(hostname=host, port=port, username=username, key_filename=key_path, timeout=timeout)
-        else:
-            client.connect(hostname=host, port=port, username=username, password=password, timeout=timeout)
-
-        stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
-        out = stdout.read().decode("utf-8", errors="replace")
-        err = stderr.read().decode("utf-8", errors="replace")
-        rc = stdout.channel.recv_exit_status()
-        return rc, out, err
-    finally:
-        try:
-            client.close()
-        except Exception:
-            pass
+    return _ssh_exec_impl(host, username, command, password, key_path, port, timeout)
 
 
 def _json_from_stdout(stdout: str):

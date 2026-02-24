@@ -1,0 +1,66 @@
+#
+# Copyright contributors to the agentic-ai-cyberres project
+#
+[project]
+name = "validation-agent"
+version = "0.1.0"
+description = "Intelligent infrastructure validation agent with workload discovery, powered by Pydantic AI. Validates VMs, Oracle databases, and MongoDB clusters with automatic application detection and adaptive validation strategies."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.0.0",
+    "pydantic-ai>=0.0.13",
+    "httpx>=0.27.0",
+    "paramiko>=3.4.0",
+    "pymongo>=4.6.0",
+    "python-dotenv>=1.0.0",
+    "colorama>=0.4.6",
+    "jinja2>=3.1.0",
+    "openai>=1.3.0",
+    "anthropic>=0.18.0",
+    "google-generativeai>=0.3.0",
+    "groq>=0.31.0",
+    "ollama>=0.1.6",
+    "mcp>=0.9.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[project.scripts]
+validation-agent = "main:main"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.5.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.black]
+line-length = 100
+target-version = ['py39']
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

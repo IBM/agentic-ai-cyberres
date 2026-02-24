@@ -50,7 +50,7 @@ class BaseResourceInfo(BaseModel):
 
 class VMResourceInfo(BaseResourceInfo):
     """VM-specific resource information."""
-    resource_type: ResourceType = Field(default=ResourceType.VM, frozen=True)
+    resource_type: Literal[ResourceType.VM] = Field(default=ResourceType.VM, frozen=True)
     ssh_user: str = Field(..., description="SSH username")
     ssh_password: Optional[str] = Field(None, description="SSH password")
     ssh_key_path: Optional[str] = Field(None, description="Path to SSH private key")
@@ -70,7 +70,7 @@ class VMResourceInfo(BaseResourceInfo):
 
 class OracleDBResourceInfo(BaseResourceInfo):
     """Oracle database resource information."""
-    resource_type: ResourceType = Field(default=ResourceType.ORACLE, frozen=True)
+    resource_type: Literal[ResourceType.ORACLE] = Field(default=ResourceType.ORACLE, frozen=True)
     
     # Connection options
     dsn: Optional[str] = Field(None, description="Oracle DSN string")
@@ -99,7 +99,7 @@ class OracleDBResourceInfo(BaseResourceInfo):
 
 class MongoDBResourceInfo(BaseResourceInfo):
     """MongoDB resource information."""
-    resource_type: ResourceType = Field(default=ResourceType.MONGODB, frozen=True)
+    resource_type: Literal[ResourceType.MONGODB] = Field(default=ResourceType.MONGODB, frozen=True)
     
     # Connection options
     uri: Optional[str] = Field(None, description="MongoDB connection URI")
@@ -219,5 +219,96 @@ class ConversationState(BaseModel):
     missing_fields: List[str] = Field(default_factory=list)
     current_question: Optional[str] = None
     completed: bool = False
+
+
+# Workload Discovery Models
+class PortInfo(BaseModel):
+    """Information about an open port."""
+    port: int = Field(..., description="Port number")
+    protocol: str = Field("tcp", description="Protocol (tcp/udp)")
+    service: Optional[str] = Field(None, description="Detected service name")
+    state: str = Field("open", description="Port state")
+    banner: Optional[str] = Field(None, description="Service banner")
+
+
+class ProcessInfo(BaseModel):
+    """Information about a running process."""
+    pid: int = Field(..., description="Process ID")
+    name: str = Field(..., description="Process name")
+    cmdline: str = Field(..., description="Command line")
+    user: str = Field(..., description="Process owner")
+    cpu_percent: Optional[float] = Field(None, description="CPU usage percentage")
+    memory_mb: Optional[float] = Field(None, description="Memory usage in MB")
+
+
+class ApplicationDetection(BaseModel):
+    """Detected application information."""
+    name: str = Field(..., description="Application name")
+    version: Optional[str] = Field(None, description="Application version")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Detection confidence (0-1)")
+    detection_method: str = Field("signature", description="Detection method (signature/port/process/manual)")
+    evidence: Dict[str, Any] = Field(default_factory=dict, description="Evidence supporting detection")
+    category: Optional[str] = Field(None, description="Application category")
+
+
+class WorkloadDiscoveryResult(BaseModel):
+    """Complete workload discovery results."""
+    host: str = Field(..., description="Target host")
+    ports: List[PortInfo] = Field(default_factory=list, description="Discovered open ports")
+    processes: List[ProcessInfo] = Field(default_factory=list, description="Running processes")
+    applications: List[ApplicationDetection] = Field(default_factory=list, description="Detected applications")
+    discovery_time: datetime = Field(default_factory=datetime.utcnow, description="Discovery timestamp")
+    errors: List[str] = Field(default_factory=list, description="Discovery errors")
+    
+    def get_primary_application(self) -> Optional[ApplicationDetection]:
+        """Get the application with highest confidence."""
+        if not self.applications:
+            return None
+        return max(self.applications, key=lambda a: a.confidence)
+    
+    @property
+    def has_errors(self) -> bool:
+        """Check if discovery had errors."""
+        return len(self.errors) > 0
+
+
+class ResourceCategory(str, Enum):
+    """Resource category based on primary application."""
+    DATABASE_SERVER = "database_server"
+    WEB_SERVER = "web_server"
+    APPLICATION_SERVER = "application_server"
+    MESSAGE_QUEUE = "message_queue"
+    CACHE_SERVER = "cache_server"
+    MIXED = "mixed"
+    UNKNOWN = "unknown"
+
+
+class ResourceClassification(BaseModel):
+    """Classification of a resource based on discovered workloads."""
+    category: ResourceCategory = Field(..., description="Resource category")
+    primary_application: Optional[ApplicationDetection] = Field(None, description="Primary application")
+    secondary_applications: List[ApplicationDetection] = Field(default_factory=list, description="Secondary applications")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Classification confidence")
+    recommended_validations: List[str] = Field(default_factory=list, description="Recommended validation checks")
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "category": self.category.value,
+            "primary_application": self.primary_application.name if self.primary_application else None,
+            "secondary_applications": [app.name for app in self.secondary_applications],
+            "confidence": self.confidence,
+            "recommended_validations": self.recommended_validations
+        }
+
+
+class ValidationStrategy(BaseModel):
+    """Validation strategy for a classified resource."""
+    name: str = Field(..., description="Strategy name")
+    description: str = Field(..., description="Strategy description")
+    validation_types: List[str] = Field(..., description="Types of validations (network, database, web, etc.)")
+    acceptance_criteria: Dict[str, Any] = Field(default_factory=dict, description="Acceptance criteria")
+    priority_checks: List[str] = Field(default_factory=list, description="Priority validation checks")
+
 
 # Made with Bob
