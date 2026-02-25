@@ -25,6 +25,8 @@ from evaluator import ResultEvaluator
 from report_generator import ReportGenerator
 from email_service import EmailService
 from conversation import ConversationHandler
+from input_guardrails import InputGuardrails, GuardrailViolationError
+from advanced_guardrails import AdvancedGuardrails, RateLimitConfig
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +34,40 @@ logger = logging.getLogger(__name__)
 class RecoveryValidationAgent:
     """Main orchestrator for recovery validation."""
     
-    def __init__(self):
-        """Initialize recovery validation agent."""
+    def __init__(self, enable_guardrails: bool = True):
+        """Initialize recovery validation agent.
+        
+        Args:
+            enable_guardrails: Enable input guardrails (default: True)
+        """
         self.credential_manager = get_credential_manager()
         self.conversation_handler = ConversationHandler()
         self.planner = ValidationPlanner()
         self.evaluator = ResultEvaluator()
         self.report_generator = ReportGenerator()
         self.mcp_client: Optional[MCPStdioClient] = None
+        
+        # Initialize guardrails
+        self.enable_guardrails = enable_guardrails
+        if self.enable_guardrails:
+            self.basic_guardrails = InputGuardrails(strict_mode=True)
+            rate_config = RateLimitConfig(
+                max_requests_per_minute=10,
+                max_requests_per_hour=100,
+                max_requests_per_day=1000
+            )
+            self.advanced_guardrails = AdvancedGuardrails(
+                enable_rate_limiting=True,
+                enable_content_filter=True,
+                enable_behavioral_analysis=True,
+                enable_encoding_validation=True,
+                rate_limit_config=rate_config
+            )
+            logger.info("✅ Guardrails enabled for Recovery Validation Agent")
+        else:
+            self.basic_guardrails = None
+            self.advanced_guardrails = None
+            logger.warning("⚠️  Guardrails disabled for Recovery Validation Agent")
         
         # Get email config
         email_config = self.credential_manager.get_email_config()
@@ -49,6 +77,48 @@ class RecoveryValidationAgent:
             from_address=email_config["from_address"]
         )
         self.default_email_recipient = email_config["recipient"]
+    
+    def validate_user_input(self, user_input: str) -> tuple[bool, Optional[str]]:
+        """Validate user input with guardrails.
+        
+        Args:
+            user_input: User's input text
+            
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        if not self.enable_guardrails or not self.basic_guardrails or not self.advanced_guardrails:
+            return True, None
+        
+        # Layer 1: Basic guardrails
+        try:
+            self.basic_guardrails.validate_and_raise(user_input)
+        except GuardrailViolationError as e:
+            error_msg = f"\n🚫 SECURITY VIOLATION DETECTED:\n{str(e)}\n"
+            logger.warning(f"Guardrail violation: {e}")
+            return False, error_msg
+        
+        # Layer 2: Advanced guardrails
+        is_valid, violations, rate_msg = self.advanced_guardrails.validate(user_input)
+        
+        if rate_msg:
+            error_msg = f"\n⏱️  RATE LIMIT: {rate_msg}\n"
+            logger.warning(f"Rate limit exceeded: {rate_msg}")
+            return False, error_msg
+        
+        if not is_valid:
+            error_msg = "\n⚠️  ADVANCED SECURITY CHECK FAILED:\n"
+            for v in violations:
+                error_msg += f"   - [{v.severity.value.upper()}] {v.message}\n"
+            logger.warning(f"Advanced guardrail violations: {len(violations)}")
+            return False, error_msg
+        
+        # Log warnings for non-blocking violations
+        warning_violations = [v for v in violations if v.severity.name in ['MEDIUM', 'LOW']]
+        if warning_violations:
+            logger.info(f"Guardrail warnings (non-blocking): {len(warning_violations)}")
+        
+        return True, None
     
     async def connect_mcp(self) -> None:
         """Connect to MCP server and discover available tools."""
@@ -624,6 +694,13 @@ class RecoveryValidationAgent:
                     reader.write("Agent 🤖", "Validation cancelled. Goodbye! 👋")
                     break
                 
+                # Validate input with guardrails
+                is_valid, error_msg = self.validate_user_input(user_input)
+                if not is_valid:
+                    reader.write("Security 🛡️", error_msg)
+                    reader.write("Agent 🤖", "Please provide valid input without sensitive information or malicious commands.")
+                    continue
+                
                 # Parse input to extract hostname and credentials
                 parsed = await self.conversation_handler.parse_initial_input(user_input)
                 host = parsed.get("host")
@@ -653,6 +730,13 @@ class RecoveryValidationAgent:
                     if cred_input.lower() in ["exit", "quit", "cancel"]:
                         reader.write("Agent 🤖", "Validation cancelled.")
                         return
+                    
+                    # Validate credential input with guardrails
+                    is_valid, error_msg = self.validate_user_input(cred_input)
+                    if not is_valid:
+                        reader.write("Security 🛡️", error_msg)
+                        reader.write("Agent 🤖", "Please provide credentials without exposing sensitive information.")
+                        continue
                     
                     # Parse credentials
                     creds = await self.conversation_handler.parse_credentials(

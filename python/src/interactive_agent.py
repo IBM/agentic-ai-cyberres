@@ -8,6 +8,7 @@ import asyncio
 import os
 import sys
 import json
+import logging
 from typing import Optional
 
 from mcp_stdio_client import MCPStdioClient
@@ -20,20 +21,49 @@ from models import (
     MongoDBResourceInfo,
     ResourceType
 )
+from input_guardrails import InputGuardrails, GuardrailViolationError
+from advanced_guardrails import AdvancedGuardrails, RateLimitConfig
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class InteractiveAgent:
     """Interactive agent that accepts natural language prompts."""
     
-    def __init__(self, use_ollama: bool = True):
+    def __init__(self, use_ollama: bool = True, enable_guardrails: bool = True):
         """Initialize interactive agent.
         
         Args:
             use_ollama: Use Ollama for local LLM (default: True)
+            enable_guardrails: Enable input guardrails (default: True)
         """
         self.mcp_client: Optional[MCPStdioClient] = None
         self.orchestrator: Optional[ValidationOrchestrator] = None
         self.use_ollama = use_ollama
+        self.enable_guardrails = enable_guardrails
+        
+        # Initialize guardrails
+        if self.enable_guardrails:
+            self.basic_guardrails = InputGuardrails(strict_mode=True)
+            rate_config = RateLimitConfig(
+                max_requests_per_minute=10,
+                max_requests_per_hour=100,
+                max_requests_per_day=1000
+            )
+            self.advanced_guardrails = AdvancedGuardrails(
+                enable_rate_limiting=True,
+                enable_content_filter=True,
+                enable_behavioral_analysis=True,
+                enable_encoding_validation=True,
+                rate_limit_config=rate_config
+            )
+            logger.info("✅ Guardrails enabled")
+        else:
+            self.basic_guardrails = None
+            self.advanced_guardrails = None
+            logger.warning("⚠️  Guardrails disabled")
         
     async def start(self):
         """Start the interactive agent."""
@@ -199,6 +229,44 @@ CONFIGURATION:
         print(f"\n🔍 Processing: {prompt}")
         
         try:
+            # Validate input with guardrails
+            if self.enable_guardrails and self.basic_guardrails and self.advanced_guardrails:
+                print("🛡️  Running security checks...")
+                
+                # Layer 1: Basic guardrails
+                try:
+                    self.basic_guardrails.validate_and_raise(prompt)
+                except GuardrailViolationError as e:
+                    print(f"\n🚫 SECURITY VIOLATION DETECTED:\n")
+                    print(str(e))
+                    print("\n💡 Your input was blocked for security reasons.")
+                    print("   Please review the violations above and try again.\n")
+                    return
+                
+                # Layer 2: Advanced guardrails
+                is_valid, violations, rate_msg = self.advanced_guardrails.validate(prompt)
+                
+                if rate_msg:
+                    print(f"\n⏱️  RATE LIMIT: {rate_msg}\n")
+                    return
+                
+                if not is_valid:
+                    print(f"\n⚠️  ADVANCED SECURITY CHECK FAILED:\n")
+                    for v in violations:
+                        print(f"   - [{v.severity.value.upper()}] {v.message}")
+                    print("\n💡 Please address the issues above and try again.\n")
+                    return
+                
+                # Log warnings for non-blocking violations
+                warning_violations = [v for v in violations if v.severity.name in ['MEDIUM', 'LOW']]
+                if warning_violations:
+                    print(f"\n⚠️  Warnings (non-blocking):")
+                    for v in warning_violations:
+                        print(f"   - {v.message}")
+                    print()
+                
+                print("✅ Security checks passed\n")
+            
             # Parse the prompt
             request = self.parse_prompt(prompt)
             
