@@ -129,7 +129,7 @@ def attach(mcp):
         uri = _build_local_uri(mongo_user, mongo_password, port, auth_db)
         # Build a single-line shell command; --quiet + JSON.stringify for clean JSON
         cmd = f"{shlex.quote(mongosh_path)} --quiet '{uri}' --eval 'JSON.stringify(db.adminCommand({{ ping: 1 }}))'"
-        rc, out, err = run_ssh_command(
+        rc, out, stderr = run_ssh_command(
             host=ssh_host,
             username=ssh_user,
             password=ssh_password,
@@ -137,8 +137,8 @@ def attach(mcp):
             command=cmd
         )
         if rc != 0:
-            logger.warning("ssh ping failed", extra={"rc": rc, "stderr": err})
-            return err("ssh exec failed", code="SSH_ERROR", rc=rc, stderr=err, stdout=out, via="ssh_exec")
+            logger.warning("ssh ping failed", extra={"rc": rc, "stderr": stderr})
+            return err("ssh exec failed", code="SSH_ERROR", rc=rc, stderr=stderr, stdout=out, via="ssh_exec")
         data = _json_from_stdout(out)
         if not data:
             logger.warning("ssh ping parse failed")
@@ -162,7 +162,7 @@ def attach(mcp):
         """
         uri = _build_local_uri(mongo_user, mongo_password, port, auth_db)
         cmd = f"{shlex.quote(mongosh_path)} --quiet '{uri}' --eval 'JSON.stringify(rs.status())'"
-        rc, out, err = run_ssh_command(
+        rc, out, stderr = run_ssh_command(
             host=ssh_host,
             username=ssh_user,
             password=ssh_password,
@@ -170,8 +170,8 @@ def attach(mcp):
             command=cmd
         )
         if rc != 0:
-            logger.warning("ssh rs.status failed", extra={"rc": rc, "stderr": err})
-            return err("ssh exec failed", code="SSH_ERROR", rc=rc, stderr=err, stdout=out, via="ssh_exec")
+            logger.warning("ssh rs.status failed", extra={"rc": rc, "stderr": stderr})
+            return err("ssh exec failed", code="SSH_ERROR", rc=rc, stderr=stderr, stdout=out, via="ssh_exec")
         data = _json_from_stdout(out)
         if not data:
             logger.warning("ssh rs.status parse failed")
@@ -219,7 +219,7 @@ def attach(mcp):
 
         cmd = f"{shlex.quote(mongosh_path)} --quiet '{uri}' --eval '{js}'"
 
-        rc, out, err = run_ssh_command(
+        rc, out, stderr = run_ssh_command(
             host=ssh_host,
             username=ssh_user,
             password=ssh_password,
@@ -227,8 +227,8 @@ def attach(mcp):
             command=cmd
         )
         if rc != 0:
-            logger.warning("ssh validate failed", extra={"rc": rc, "stderr": err})
-            return err("ssh exec failed", code="SSH_ERROR", rc=rc, stderr=err, stdout=out, via="ssh_exec")
+            logger.warning("ssh validate failed", extra={"rc": rc, "stderr": stderr})
+            return err("ssh exec failed", code="SSH_ERROR", rc=rc, stderr=stderr, stdout=out, via="ssh_exec")
 
         data = _json_from_stdout(out)
         if not data:
