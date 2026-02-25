@@ -19,6 +19,7 @@ from agents.base import AgentConfig, EnhancedAgent
 from tool_coordinator import ToolCoordinator
 from state_manager import StateManager, WorkflowState
 from feature_flags import FeatureFlags
+from classification_cache import ClassificationCache
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,89 @@ Provide:
 - Risk assessment
 - Key indicators that led to classification"""
     
+    # Few-shot examples for better classification accuracy
+    CLASSIFICATION_EXAMPLES = """
+# Classification Examples (Few-Shot Learning)
+
+## Example 1: Oracle Database Server
+**Input:**
+- Ports: 1521 (Oracle), 5500 (Enterprise Manager)
+- Processes: oracle, tnslsnr, ora_pmon, ora_smon
+- Applications: Oracle Database 19c
+
+**Output:**
+- Category: DATABASE_SERVER
+- Confidence: 0.95
+- Primary Application: Oracle Database 19c
+- Reasoning: Port 1521 is Oracle's default listener port, multiple Oracle-specific processes (pmon, smon) are running, and Oracle Database is explicitly detected.
+- Recommended Validations: ["oracle_db_validation", "connection_test", "schema_validation"]
+- Risk Level: high (database contains critical data)
+- Key Indicators: ["port_1521", "oracle_processes", "tnslsnr_listener"]
+
+## Example 2: Web Server with Application
+**Input:**
+- Ports: 80 (HTTP), 443 (HTTPS), 8080 (Alt HTTP)
+- Processes: nginx, java, tomcat
+- Applications: Nginx 1.18, Apache Tomcat 9.0
+
+**Output:**
+- Category: APPLICATION_SERVER
+- Confidence: 0.85
+- Primary Application: Apache Tomcat 9.0
+- Secondary Applications: ["Nginx 1.18"]
+- Reasoning: While Nginx is present on standard web ports, Tomcat on 8080 indicates this is primarily an application server with Nginx as reverse proxy.
+- Recommended Validations: ["web_server_validation", "application_health_check", "ssl_certificate_check"]
+- Risk Level: medium (public-facing application)
+- Key Indicators: ["tomcat_process", "nginx_reverse_proxy", "port_8080"]
+
+## Example 3: MongoDB Cluster Node
+**Input:**
+- Ports: 27017 (MongoDB), 27018 (Shard), 27019 (Config)
+- Processes: mongod, mongos
+- Applications: MongoDB 4.4
+
+**Output:**
+- Category: DATABASE_SERVER
+- Confidence: 0.92
+- Primary Application: MongoDB 4.4
+- Reasoning: Multiple MongoDB ports indicate a cluster configuration. Presence of mongod and mongos processes confirms MongoDB deployment.
+- Recommended Validations: ["mongo_db_validation", "cluster_health_check", "replication_status"]
+- Risk Level: high (distributed database system)
+- Key Indicators: ["port_27017", "mongod_process", "cluster_ports"]
+
+## Example 4: Container Host
+**Input:**
+- Ports: 2375 (Docker), 6443 (Kubernetes API), 10250 (Kubelet)
+- Processes: dockerd, kubelet, containerd
+- Applications: Docker 20.10, Kubernetes 1.21
+
+**Output:**
+- Category: CONTAINER_HOST
+- Confidence: 0.98
+- Primary Application: Kubernetes 1.21
+- Secondary Applications: ["Docker 20.10"]
+- Reasoning: Kubernetes API port and kubelet process indicate K8s cluster node. Docker is the container runtime.
+- Recommended Validations: ["container_health_check", "pod_validation", "cluster_connectivity"]
+- Risk Level: critical (orchestration platform)
+- Key Indicators: ["port_6443", "kubelet_process", "k8s_api"]
+
+## Example 5: Unknown/Mixed Workload
+**Input:**
+- Ports: 22 (SSH), 3000 (Custom), 9090 (Custom)
+- Processes: sshd, node, python3
+- Applications: Node.js, Python
+
+**Output:**
+- Category: UNKNOWN
+- Confidence: 0.45
+- Primary Application: Node.js
+- Secondary Applications: ["Python"]
+- Reasoning: Custom ports and generic processes don't match known patterns. Could be development server or custom application.
+- Recommended Validations: ["basic_connectivity", "process_validation"]
+- Risk Level: low (unclear purpose, needs investigation)
+- Key Indicators: ["custom_ports", "generic_processes", "no_clear_pattern"]
+"""
+    
     def __init__(
         self,
         mcp_client: Optional[any] = None,
@@ -111,7 +195,10 @@ Provide:
         # Fallback to rule-based classifier
         self.fallback_classifier = ApplicationClassifier()
         
-        self.log_step("Classification agent initialized")
+        # Day 4: Initialize classification cache
+        self.cache = ClassificationCache(ttl=3600, max_size=1000)
+        
+        self.log_step("Classification agent initialized with caching")
     
     async def classify(
         self,
@@ -142,6 +229,26 @@ Provide:
                 }
             )
         
+        # Day 4: Check cache first if caching is enabled
+        if (self.feature_flags and
+            self.feature_flags.is_enabled("classification_caching")):
+            
+            cached_result = self.cache.get(discovery_result)
+            if cached_result:
+                self.log_step(f"Using cached classification (hit rate: {self.cache.get_hit_rate():.1f}%)")
+                
+                self.record_execution(
+                    action="classification_complete",
+                    result={
+                        "host": discovery_result.host,
+                        "category": cached_result.category.value,
+                        "confidence": cached_result.confidence,
+                        "method": "cache"
+                    }
+                )
+                
+                return cached_result
+        
         # Check if AI classification is enabled
         use_ai = (
             self.feature_flags and
@@ -152,6 +259,12 @@ Provide:
             try:
                 self.log_step("Using AI-powered classification")
                 classification = await self._classify_with_ai(discovery_result)
+                
+                # Day 4: Cache the result
+                if (self.feature_flags and
+                    self.feature_flags.is_enabled("classification_caching")):
+                    self.cache.set(discovery_result, classification)
+                    self.log_step(f"Cached classification result (cache size: {len(self.cache._cache)})")
                 
                 self.record_execution(
                     action="classification_complete",
@@ -302,18 +415,35 @@ Provide:
                     prompt_parts.append(f"  Version: {app.version}")
         
         prompt_parts.extend([
+            "\n## Classification Examples",
+            "Here are examples of how to classify different resource types:",
+            self.CLASSIFICATION_EXAMPLES,
             "\n## Your Task",
-            "Analyze the above data and provide:",
+            "Now analyze the resource data above and provide:",
             "1. Resource category classification",
             "2. Confidence score (0.0-1.0)",
             "3. Primary and secondary applications",
             "4. Clear reasoning for your classification",
             "5. Recommended validation types",
             "6. Risk level assessment",
-            "7. Key indicators that led to your classification"
+            "7. Key indicators that led to your classification",
+            "\nUse the examples above as a guide for your analysis format and reasoning depth."
         ])
         
         return "\n".join(prompt_parts)
+    
+    def get_cache_stats(self) -> Dict[str, any]:
+        """Get classification cache statistics.
+        
+        Returns:
+            Dictionary with cache statistics
+        """
+        return self.cache.get_stats()
+    
+    def clear_cache(self):
+        """Clear classification cache."""
+        self.cache.clear()
+        self.log_step("Classification cache cleared")
     
     async def classify_batch(
         self,

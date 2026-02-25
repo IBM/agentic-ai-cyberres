@@ -77,11 +77,12 @@ I'll help you validate your recovered infrastructure resources (VMs, Oracle data
 To get started, please tell me:
 1. What type of resource did you recover? (VM, Oracle, or MongoDB)
 2. What is the IP address or hostname of the resource?
+3. What email address should I send the validation report to?
 
 You can provide this information in natural language, for example:
-- "I recovered a VM at 192.168.1.100"
-- "I have an Oracle database on db-server.example.com"
-- "MongoDB cluster at mongo1.local"
+- "I recovered a VM at 192.168.1.100, send report to admin@example.com"
+- "I have an Oracle database on db-server.example.com, email me at dba@company.com"
+- "MongoDB cluster at mongo1.local, report to ops@example.com"
 """
     
     def get_follow_up_questions(self, resource_type: ResourceType) -> list[str]:
@@ -116,7 +117,7 @@ You can provide this information in natural language, for example:
         return []
     
     async def parse_initial_input(self, user_input: str) -> Dict[str, Any]:
-        """Parse initial user input to extract resource type and host using regex.
+        """Parse initial user input to extract resource type, host, and email using regex.
         
         Args:
             user_input: User's input text
@@ -141,6 +142,11 @@ You can provide this information in natural language, for example:
                 if hostname_match:
                     host = hostname_match.group(1)
             
+            # Extract email address
+            email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+            email_match = re.search(email_pattern, user_input)
+            email = email_match.group(0) if email_match else None
+            
             # Determine resource type from keywords
             user_input_lower = user_input.lower()
             resource_type = None
@@ -152,12 +158,12 @@ You can provide this information in natural language, for example:
             elif any(keyword in user_input_lower for keyword in ['mongodb', 'mongo', 'mongo db']):
                 resource_type = ResourceType.MONGODB
             
-            logger.info(f"Parsed: resource_type={resource_type}, host={host}")
-            return {"resource_type": resource_type, "host": host}
+            logger.info(f"Parsed: resource_type={resource_type}, host={host}, email={email}")
+            return {"resource_type": resource_type, "host": host, "email_recipient": email}
             
         except Exception as e:
             logger.error(f"Error parsing initial input: {e}")
-            return {"resource_type": None, "host": None}
+            return {"resource_type": None, "host": None, "email_recipient": None}
     
     async def parse_credentials(
         self,

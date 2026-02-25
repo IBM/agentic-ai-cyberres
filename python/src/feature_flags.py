@@ -36,11 +36,19 @@ class FeatureFlags:
         'parallel_tool_execution': False,  # Execute tools in parallel
         'ai_classification': False,        # Use AI for classification
         'ai_reporting': False,             # Use AI for report generation
+        'ai_evaluation': False,            # Use AI for evaluation
         'ai_plan_optimization': False,     # Use AI to optimize plans
         'auto_resume_workflows': False,    # Auto-resume failed workflows
         'batch_validations': False,        # Batch multiple validations
         'lazy_discovery': False,           # Only discover when needed
         'enhanced_error_recovery': True,   # Enhanced error recovery
+        
+        # Phase 3 flags - Cost Optimization (Day 3-4)
+        'smart_llm_usage': True,           # Intelligent LLM usage (skip for simple cases)
+        'llm_cost_optimization': True,     # Enable all cost optimization features
+        'classification_caching': True,    # Cache classification results
+        'fast_path_discovery': True,       # Skip LLM for simple VM discovery
+        'template_reporting': True,        # Use templates for simple reports
     }
     
     def __init__(self, config: Optional[Dict[str, bool]] = None):

@@ -311,4 +311,43 @@ class ValidationStrategy(BaseModel):
     priority_checks: List[str] = Field(default_factory=list, description="Priority validation checks")
 
 
+# Enhanced Reporting Models (Week 1 Implementation)
+class Finding(BaseModel):
+    """Individual finding with detailed context."""
+    title: str = Field(..., description="Finding title")
+    severity: Literal["critical", "high", "medium", "low", "info"] = Field(..., description="Severity level")
+    category: Literal["security", "performance", "availability", "compliance", "configuration"] = Field(..., description="Finding category")
+    description: str = Field(..., description="Detailed description")
+    impact: str = Field(..., description="Business/technical impact")
+    evidence: List[str] = Field(default_factory=list, description="Supporting evidence")
+    recommendations: List[str] = Field(default_factory=list, description="Specific recommendations")
+    affected_components: List[str] = Field(default_factory=list, description="Affected components")
+
+
+class MetricValue(BaseModel):
+    """Metric with trend information."""
+    name: str = Field(..., description="Metric name")
+    current: float = Field(..., description="Current value")
+    previous: Optional[float] = Field(None, description="Previous value")
+    baseline: Optional[float] = Field(None, description="Baseline value")
+    trend: Literal["improving", "stable", "degrading", "unknown"] = Field(..., description="Trend direction")
+    change_percentage: Optional[float] = Field(None, description="Percentage change")
+    unit: str = Field(..., description="Unit of measurement")
+    threshold: Optional[float] = Field(None, description="Alert threshold")
+    status: Literal["good", "warning", "critical"] = Field(..., description="Status based on threshold")
+
+
+class Action(BaseModel):
+    """Actionable item with details."""
+    title: str = Field(..., description="Action title")
+    priority: Literal["critical", "high", "medium", "low"] = Field(..., description="Priority level")
+    description: str = Field(..., description="Action description")
+    effort: str = Field(..., description="Estimated effort (e.g., '2 hours', '1 day')")
+    impact: str = Field(..., description="Expected impact")
+    owner: Optional[str] = Field(None, description="Responsible team/person")
+    timeline: str = Field(..., description="Recommended timeline")
+    dependencies: List[str] = Field(default_factory=list, description="Dependencies")
+
+
+
 # Made with Bob

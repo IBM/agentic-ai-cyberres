@@ -92,14 +92,31 @@ class CredentialManager:
         """Get email configuration from environment.
         
         Returns:
-            Dictionary with recipient, smtp_server, smtp_port
+            Dictionary with recipient, smtp_server, smtp_port, and authentication settings
         """
-        return {
+        use_tls = os.getenv("SMTP_USE_TLS", "false").lower() in ("true", "1", "yes")
+        
+        # Log what we're reading from environment
+        logger.info("Reading email configuration from environment:")
+        logger.info(f"  SMTP_SERVER env: {os.getenv('SMTP_SERVER', 'NOT SET')}")
+        logger.info(f"  SMTP_PORT env: {os.getenv('SMTP_PORT', 'NOT SET')}")
+        logger.info(f"  SMTP_USE_TLS env: {os.getenv('SMTP_USE_TLS', 'NOT SET')}")
+        logger.info(f"  SMTP_USERNAME env: {'SET' if os.getenv('SMTP_USERNAME') else 'NOT SET'}")
+        logger.info(f"  SMTP_PASSWORD env: {'SET' if os.getenv('SMTP_PASSWORD') else 'NOT SET'}")
+        
+        config = {
             "recipient": os.getenv("USER_EMAIL"),
             "smtp_server": os.getenv("SMTP_SERVER", "localhost"),
             "smtp_port": os.getenv("SMTP_PORT", "25"),
             "from_address": os.getenv("EMAIL_FROM", "recovery-validation@cyberres.com"),
+            "smtp_username": os.getenv("SMTP_USERNAME"),
+            "smtp_password": os.getenv("SMTP_PASSWORD"),
+            "use_tls": use_tls,
         }
+        
+        logger.info(f"Email config created: smtp_server={config['smtp_server']}, smtp_port={config['smtp_port']}, use_tls={config['use_tls']}")
+        
+        return config
     
     def has_ssh_credentials(self) -> bool:
         """Check if SSH credentials are available in environment."""

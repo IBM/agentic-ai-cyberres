@@ -36,7 +36,7 @@ class AgentConfig:
     
     def __init__(
         self,
-        model: str = "openai:gpt-4",
+        model: Optional[str] = None,
         api_key: Optional[str] = None,
         temperature: float = 0.1,
         max_tokens: int = 4000
@@ -44,13 +44,41 @@ class AgentConfig:
         """Initialize agent configuration.
         
         Args:
-            model: Model identifier (e.g., "openai:gpt-4", "anthropic:claude-3-opus")
+            model: Model identifier (e.g., "openai:gpt-4", "ollama:llama3.1:8b")
+                   If not provided, uses LLM_BACKEND and OLLAMA_MODEL/OPENAI_MODEL env vars
             api_key: API key for the model provider (uses env var if not provided)
             temperature: Sampling temperature (0.0-1.0)
             max_tokens: Maximum tokens in response
         """
-        self.model = model
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        # Auto-detect model from environment if not provided
+        if model is None:
+            llm_backend = os.getenv("LLM_BACKEND", "ollama")
+            if llm_backend == "ollama":
+                ollama_model = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+                self.model = f"ollama:{ollama_model}"
+                self.api_key = None  # Ollama doesn't need API key
+            elif llm_backend == "openai":
+                openai_model = os.getenv("OPENAI_MODEL", "gpt-4")
+                self.model = f"openai:{openai_model}"
+                self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+            elif llm_backend == "groq":
+                groq_model = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
+                self.model = f"groq:{groq_model}"
+                self.api_key = api_key or os.getenv("GROQ_API_KEY")
+            else:
+                # Default to Ollama if unknown backend
+                self.model = f"ollama:{os.getenv('OLLAMA_MODEL', 'llama3.1:8b')}"
+                self.api_key = None
+        else:
+            self.model = model
+            # Set API key based on model prefix
+            if model.startswith("openai:"):
+                self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+            elif model.startswith("groq:"):
+                self.api_key = api_key or os.getenv("GROQ_API_KEY")
+            else:
+                self.api_key = api_key
+        
         self.temperature = temperature
         self.max_tokens = max_tokens
     
@@ -71,10 +99,23 @@ class AgentConfig:
         try:
             from pydantic_ai import Agent
             
+            # Configure model with base URL for Ollama if needed
+            if self.model.startswith("ollama:"):
+                # Pydantic AI supports Ollama with base_url parameter
+                ollama_host = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+                # For Pydantic AI, we need to set OLLAMA_BASE_URL in environment
+                # The format should be: http://host:port/v1
+                if not ollama_host.endswith("/v1"):
+                    ollama_host = f"{ollama_host}/v1"
+                os.environ.setdefault("OLLAMA_BASE_URL", ollama_host)
+            
+            # Create agent with correct Pydantic AI API (v0.0.13+)
+            # The API changed: result_type -> output_type, system_prompt -> system_prompt (kept same)
+            # Model is first positional argument
             return Agent(
-                model=self.model,
-                result_type=result_type,
-                system_prompt=system_prompt
+                self.model,  # First positional argument
+                output_type=result_type,  # Changed from result_type to output_type
+                system_prompt=system_prompt  # This parameter name is still correct
             )
         except ImportError:
             logger.error("pydantic_ai not installed. Install with: pip install pydantic-ai")

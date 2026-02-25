@@ -38,9 +38,14 @@ class ToolSelectionResult:
     priority: str
     can_execute: bool
     reasoning: str
-    required_credentials: List[str]
+    required_credentials: Optional[List[str]] = None  # Make optional with default
     missing_credentials: Optional[List[str]] = None
     parameters: Optional[Dict[str, Any]] = None
+    
+    def __post_init__(self):
+        """Ensure required_credentials is always a list."""
+        if self.required_credentials is None:
+            self.required_credentials = []
 
 
 @dataclass
@@ -154,20 +159,74 @@ class LLMToolSelector:
         Returns:
             Formatted prompt string
         """
+        # Analyze available credentials to provide clear guidance
+        available_creds = context.get("available_credentials", {})
+        has_ssh = available_creds.get("ssh") is not None
+        has_app_creds = any(k != "ssh" and v is not None for k, v in available_creds.items())
+        
+        cred_status = []
+        if has_ssh:
+            cred_status.append("✓ SSH credentials ARE AVAILABLE - SSH-based tools CAN execute")
+        else:
+            cred_status.append("✗ SSH credentials NOT available - SSH-based tools CANNOT execute")
+        
+        if has_app_creds:
+            app_cred_types = [k for k, v in available_creds.items() if k != "ssh" and v is not None]
+            cred_status.append(f"✓ Application credentials available for: {', '.join(app_cred_types)}")
+        else:
+            cred_status.append("✗ No application-specific credentials available")
+        
+        # Build explicit SSH-enabled tools list if SSH is available
+        ssh_enabled_examples = ""
+        if has_ssh:
+            ssh_enabled_examples = """
+
+CRITICAL: SSH CREDENTIALS ARE AVAILABLE - The following tools CAN EXECUTE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✓ discover_applications - CAN EXECUTE (uses SSH to scan processes/ports)
+✓ discover_workload - CAN EXECUTE (uses SSH to detect applications)
+✓ discover_os_only - CAN EXECUTE (uses SSH to get OS info)
+✓ get_raw_server_data - CAN EXECUTE (uses SSH to collect system data)
+✓ validate_vm - CAN EXECUTE (uses SSH for VM validation)
+✓ check_network_connectivity - CAN EXECUTE (uses SSH/ping)
+
+These tools DO NOT need application credentials (Oracle/MongoDB passwords).
+They work with SSH credentials alone. Mark them as can_execute: true.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Tools that CANNOT execute without app credentials:
+✗ connect_to_db - CANNOT EXECUTE (needs Oracle/MongoDB credentials)
+✗ validate_oracle_db - CANNOT EXECUTE (needs Oracle credentials)
+✗ validate_mongodb - CANNOT EXECUTE (needs MongoDB credentials)
+✗ query_database - CANNOT EXECUTE (needs database credentials)
+"""
+        
         return f"""You are an intelligent tool selector for infrastructure validation.
 
 Your task: Select the most appropriate validation tools based on available context.
 
+CREDENTIAL STATUS (READ THIS CAREFULLY):
+{chr(10).join(cred_status)}{ssh_enabled_examples}
+
 Context:
 {json.dumps(context, indent=2)}
+
+MANDATORY RULES FOR SSH-BASED TOOLS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. If SSH credentials are available, ALL SSH-based discovery tools MUST be marked as can_execute: true
+2. SSH-based tools include ANY tool with these keywords: "discover", "workload", "get_raw_server_data", "validate_vm"
+3. SSH-based tools DO NOT require application credentials (Oracle/MongoDB passwords)
+4. NEVER mark SSH-based tools as blocked by missing application credentials
+5. Application credentials are ONLY needed for direct database connection tools (connect_to_db, validate_oracle_db, etc.)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Instructions:
 1. Analyze each available tool's capabilities and requirements
 2. Match tools to discovered applications
-3. Check if required credentials are available
-4. Prioritize tools that can execute with available credentials
-5. Provide clear reasoning for each selection
-6. Explain why tools cannot execute if credentials are missing
+3. Check if required credentials are available (see CREDENTIAL STATUS above)
+4. For SSH-based tools: If SSH is available, mark can_execute: true
+5. For direct-access tools: Only mark can_execute: true if app credentials available
+6. Provide clear reasoning for each selection
 
 Priority Guidelines:
 - CRITICAL: Discovery and core validation tools (especially SSH-based discovery)
@@ -175,10 +234,20 @@ Priority Guidelines:
 - MEDIUM: Deep validation requiring app credentials
 - LOW: Optional/nice-to-have validations
 
-Credential Awareness:
-- SSH-based tools (like *_discover_and_validate) only need SSH credentials
-- Direct-access tools (like *_connect, *_query) need application credentials
-- Prefer SSH-based tools when app credentials are unavailable
+Tool Classification Examples:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SSH-BASED (need only SSH credentials):
+  ✓ discover_applications → can_execute: true (if SSH available)
+  ✓ discover_workload → can_execute: true (if SSH available)
+  ✓ discover_os_only → can_execute: true (if SSH available)
+  ✓ get_raw_server_data → can_execute: true (if SSH available)
+  ✓ validate_vm → can_execute: true (if SSH available)
+
+DIRECT-ACCESS (need app credentials):
+  ✗ connect_to_db → can_execute: false (if no Oracle/MongoDB creds)
+  ✗ validate_oracle_db → can_execute: false (if no Oracle creds)
+  ✗ validate_mongodb → can_execute: false (if no MongoDB creds)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Output JSON format (IMPORTANT: Return ONLY valid JSON, no markdown):
 {{
@@ -238,6 +307,7 @@ Think step by step and provide comprehensive reasoning. Return ONLY the JSON obj
         """Fallback selection if LLM fails.
         
         Uses simple heuristics to select tools when LLM is unavailable.
+        IMPROVED: Only selects tools for DETECTED applications.
         
         Args:
             discovered_apps: Discovered applications
@@ -252,39 +322,93 @@ Think step by step and provide comprehensive reasoning. Return ONLY the JSON obj
         selected_tools = []
         has_ssh = available_credentials.get("ssh") is not None
         
-        # Select SSH-based discovery tools
+        # Extract detected application names (lowercase for matching)
+        detected_app_names = [
+            app.get("name", "").lower()
+            for app in discovered_apps
+        ]
+        
+        logger.info(f"Detected applications for tool selection: {detected_app_names}")
+        
+        # Map application keywords to tool patterns
+        app_tool_patterns = {
+            "oracle": ["oracle", "db_oracle"],
+            "mongodb": ["mongo", "db_mongo"],
+            "mongo": ["mongo", "db_mongo"],
+            "postgresql": ["postgres", "db_postgres"],
+            "postgres": ["postgres", "db_postgres"],
+            "mysql": ["mysql", "db_mysql"],
+            "nginx": ["nginx", "web"],
+            "apache": ["apache", "web"],
+            "tomcat": ["tomcat", "app"],
+        }
+        
+        # Select tools based on detected applications
         for tool in available_tools:
             tool_name = tool["name"]
             tool_lower = tool_name.lower()
             
-            # Prioritize discover_and_validate tools
-            if "discover" in tool_lower and "validate" in tool_lower and has_ssh:
-                selected_tools.append(ToolSelectionResult(
-                    tool_name=tool_name,
-                    priority="CRITICAL",
-                    can_execute=True,
-                    reasoning="SSH-based discovery tool (fallback selection)",
-                    required_credentials=["ssh"],
-                    parameters=self._build_ssh_parameters(available_credentials["ssh"])
-                ))
+            # Check if this tool matches any detected application
+            tool_matches_app = False
+            matched_app = None
             
-            # Add VM tools
-            elif any(p in tool_lower for p in ["vm_", "ping", "ssh"]) and has_ssh:
+            for app_name in detected_app_names:
+                # Check if app name matches any tool patterns
+                if app_name in app_tool_patterns:
+                    patterns = app_tool_patterns[app_name]
+                    if any(pattern in tool_lower for pattern in patterns):
+                        tool_matches_app = True
+                        matched_app = app_name
+                        break
+            
+            # Only add tool if it matches a detected application
+            if tool_matches_app and has_ssh:
                 selected_tools.append(ToolSelectionResult(
                     tool_name=tool_name,
                     priority="HIGH",
                     can_execute=True,
-                    reasoning="Infrastructure validation tool (fallback selection)",
+                    reasoning=f"Tool for detected application: {matched_app} (fallback selection)",
                     required_credentials=["ssh"],
                     parameters=self._build_ssh_parameters(available_credentials["ssh"])
                 ))
+                logger.info(f"Selected tool {tool_name} for detected app {matched_app}")
+            
+            # Always include basic VM validation tools
+            elif any(p in tool_lower for p in ["vm_core", "vm_ping"]) and has_ssh:
+                selected_tools.append(ToolSelectionResult(
+                    tool_name=tool_name,
+                    priority="MEDIUM",
+                    can_execute=True,
+                    reasoning="Basic VM validation tool (fallback selection)",
+                    required_credentials=["ssh"],
+                    parameters=self._build_ssh_parameters(available_credentials["ssh"])
+                ))
+                logger.info(f"Selected basic VM tool {tool_name}")
+        
+        # If no tools selected, add basic VM validation
+        if not selected_tools and has_ssh:
+            for tool in available_tools:
+                tool_name = tool["name"]
+                tool_lower = tool_name.lower()
+                if "vm" in tool_lower or "ping" in tool_lower:
+                    selected_tools.append(ToolSelectionResult(
+                        tool_name=tool_name,
+                        priority="MEDIUM",
+                        can_execute=True,
+                        reasoning="Default VM validation (no specific apps detected)",
+                        required_credentials=["ssh"],
+                        parameters=self._build_ssh_parameters(available_credentials["ssh"])
+                    ))
+                    break
         
         summary = ToolSelectionSummary(
             total_tools_available=len(available_tools),
             tools_can_execute=len(selected_tools),
             tools_blocked_by_credentials=0,
-            recommendation="Using fallback selection. LLM unavailable."
+            recommendation=f"Using fallback selection. Selected {len(selected_tools)} tools based on detected applications."
         )
+        
+        logger.info(f"Fallback selection complete: {len(selected_tools)} tools selected")
         
         return selected_tools, summary
     

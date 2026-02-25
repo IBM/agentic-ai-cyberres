@@ -46,7 +46,10 @@ class RecoveryValidationAgent:
         self.email_service = EmailService(
             smtp_server=email_config["smtp_server"],
             smtp_port=int(email_config["smtp_port"]),
-            from_address=email_config["from_address"]
+            from_address=email_config["from_address"],
+            smtp_username=email_config.get("smtp_username"),
+            smtp_password=email_config.get("smtp_password"),
+            use_tls=email_config.get("use_tls", False)
         )
         self.default_email_recipient = email_config["recipient"]
     
@@ -164,13 +167,24 @@ class RecoveryValidationAgent:
                     collected_info
                 )
                 
+                # Determine email recipient: use user-provided email or fall back to default
+                email_recipient = collected_info.get("email_recipient") or self.default_email_recipient
+                
+                # Ask for email if not provided and not in environment
+                if not email_recipient:
+                    reader.write(
+                        "Agent 🤖",
+                        "What email address should I send the validation report to?"
+                    )
+                    continue
+                
                 # Create validation request
                 validation_request = ValidationRequest(
                     resource_info=resource_info,
                     credential_source=CredentialSource.USER_PROVIDED,
                     auto_discover=True,
                     send_email=True,
-                    email_recipient=self.default_email_recipient
+                    email_recipient=email_recipient
                 )
                 
                 reader.write(
@@ -181,7 +195,7 @@ class RecoveryValidationAgent:
                     f"2. Generate a validation plan\n"
                     f"3. Execute validation checks\n"
                     f"4. Evaluate results\n"
-                    f"5. Send a detailed report to {self.default_email_recipient or 'you'}\n\n"
+                    f"5. Send a detailed report to {email_recipient}\n\n"
                     f"Starting validation..."
                 )
                 
@@ -297,6 +311,9 @@ class RecoveryValidationAgent:
             write_progress("=" * 60)
             
             execution_time = time.time() - start_time
+            logger.info("=" * 70)
+            logger.info(f"🎭 orchestrator_agent - Workflow completed in {execution_time:.2f}s")
+            logger.info("=" * 70)
             write_progress(f"\n✓ Total execution time: {execution_time:.2f} seconds")
             
             return report
@@ -315,7 +332,8 @@ class RecoveryValidationAgent:
     async def run_mcp_centric_validation(
         self,
         ssh_creds: Dict[str, str],
-        reader=None
+        reader=None,
+        email_recipient: Optional[str] = None
     ) -> ValidationReport:
         """Run MCP-centric validation workflow with LLM-driven tool selection.
         
@@ -343,6 +361,13 @@ class RecoveryValidationAgent:
             logger.info(message)
         
         try:
+            # Log orchestration start
+            logger.info("=" * 70)
+            logger.info("🎭 ORCHESTRATED VALIDATION WORKFLOW STARTING")
+            logger.info("=" * 70)
+            logger.info(f"🎭 orchestrator_agent - Coordinating multi-agent validation workflow")
+            logger.info(f"🎭 orchestrator_agent - Target: {ssh_creds['hostname']}")
+            
             # Connect to MCP server if not already connected
             if self.mcp_client is None:
                 write_progress("Connecting to MCP server...")
@@ -351,6 +376,7 @@ class RecoveryValidationAgent:
             write_progress(f"✓ Connected to MCP server ({len(self.mcp_client.get_available_tools())} tools available)")
             
             # Step 1: Discover OS
+            logger.info("🎭 discovery_agent - Phase 1: OS Discovery")
             write_progress(f"🔍 Discovering operating system on {ssh_creds['hostname']}...")
             try:
                 # Map parameters correctly for MCP tools
@@ -381,17 +407,30 @@ class RecoveryValidationAgent:
                 write_progress(f"⚠ OS discovery failed: {e}")
             
             # Step 2: Discover applications
+            logger.info("🎭 discovery_agent - Phase 2: Application Discovery")
             write_progress("🔍 Discovering applications and services...")
             try:
                 apps_result = await self.mcp_client.call_tool("discover_applications", mcp_params)
                 
-                # Extract applications from result
-                if isinstance(apps_result, dict) and "data" in apps_result:
-                    discovered_apps = apps_result["data"].get("applications", [])
-                elif isinstance(apps_result, dict):
-                    discovered_apps = apps_result.get("applications", [])
-                else:
-                    discovered_apps = []
+                # Extract applications from MCP result
+                # MCP tools return: {"ok": true, "data": {...}} or {"ok": false, "error": "..."}
+                discovered_apps = []
+                
+                if isinstance(apps_result, dict):
+                    # Check if it's a successful MCP response
+                    if apps_result.get("ok") and "data" in apps_result:
+                        data = apps_result["data"]
+                        discovered_apps = data.get("applications", [])
+                        logger.info(f"Successfully discovered {len(discovered_apps)} applications")
+                    # Check if it's already unwrapped data
+                    elif "applications" in apps_result:
+                        discovered_apps = apps_result.get("applications", [])
+                        logger.info(f"Found {len(discovered_apps)} applications in unwrapped response")
+                    # Check for error response
+                    elif not apps_result.get("ok", True):
+                        error_msg = apps_result.get("error", "Unknown error")
+                        logger.warning(f"Application discovery returned error: {error_msg}")
+                        write_progress(f"⚠ Application discovery error: {error_msg}")
                 
                 if discovered_apps:
                     write_progress(f"✓ Found {len(discovered_apps)} applications:")
@@ -403,12 +442,14 @@ class RecoveryValidationAgent:
                         write_progress(f"  ... and {len(discovered_apps) - 5} more")
                 else:
                     write_progress("⚠ No applications discovered")
+                    logger.warning("Application discovery returned no applications")
             except Exception as e:
-                logger.error(f"Application discovery failed: {e}")
+                logger.error(f"Application discovery failed: {e}", exc_info=True)
                 discovered_apps = []
                 write_progress(f"⚠ Application discovery failed: {e}")
             
             # Step 3: Get tool descriptions from MCP
+            logger.info("🎭 classification_agent - Phase 3: Tool Classification")
             write_progress("📋 Getting tool descriptions from MCP server...")
             try:
                 tools_list = await self.mcp_client.list_tools()
@@ -430,6 +471,7 @@ class RecoveryValidationAgent:
                 ]
             
             # Step 4: Gather available credentials
+            logger.info("🎭 classification_agent - Phase 4: Credential Analysis")
             write_progress("🔑 Checking available credentials...")
             available_credentials = {"ssh": ssh_creds}
             
@@ -448,6 +490,7 @@ class RecoveryValidationAgent:
                     pass  # No credentials available for this app
             
             # Step 5: LLM-driven tool selection
+            logger.info("🎭 classification_agent - Phase 5: LLM-Driven Tool Selection")
             write_progress("🤖 Using LLM to select validation tools...")
             llm_selector = LLMToolSelector()
             validation_goal = f"Validate infrastructure and applications on {ssh_creds['hostname']}"
@@ -465,6 +508,7 @@ class RecoveryValidationAgent:
             write_progress(f"  - Recommendation: {summary.recommendation}")
             
             # Step 6: Run validations (only executable tools)
+            logger.info("🎭 validation_agent - Phase 6: Executing Validations")
             executable_tools = [t for t in selected_tools if t.can_execute]
             write_progress(f"⚡ Running {len(executable_tools)} validations...")
             validation_results = []
@@ -507,13 +551,15 @@ class RecoveryValidationAgent:
                     write_progress(f"  ... and {len(skipped_tools) - 3} more")
             
             successful = len([r for r in validation_results if r["status"] == "success"])
+            logger.info(f"🎭 validation_agent - Validations complete: {successful}/{len(validation_results)} successful")
             write_progress(f"✓ Validations completed: {successful}/{len(validation_results)} successful")
             
-            # Step 5: Generate report
-            write_progress("📊 Generating validation report...")
+            # Step 7: Generate comprehensive report using AI-powered reporting agent
+            logger.info("🎭 report_generation_agent - Phase 7: AI-Powered Report Generation")
+            write_progress("📊 Generating comprehensive validation report...")
             
             # Create a simplified validation report
-            from models import ValidationReport, ResourceValidationResult, ValidationStatus
+            from models import ValidationReport, ResourceValidationResult, ValidationStatus, CheckResult
             
             # Determine overall status
             if successful == len(validation_results):
@@ -529,12 +575,25 @@ class RecoveryValidationAgent:
             # Calculate execution time
             execution_time = time.time() - start_time
             
+            # Convert validation results to CheckResult format
+            checks = []
+            for i, val_result in enumerate(validation_results):
+                check_status = ValidationStatus.PASS if val_result["status"] == "success" else ValidationStatus.FAIL
+                checks.append(CheckResult(
+                    check_id=f"check_{i+1}",
+                    check_name=val_result["tool"],
+                    status=check_status,
+                    message=val_result.get("reasoning", ""),
+                    details=val_result.get("result") if val_result["status"] == "success" else {"error": val_result.get("error")}
+                ))
+            
             # Create validation result with all required fields
             validation_result = ResourceValidationResult(
                 resource_type=ResourceType.VM,
                 resource_host=ssh_creds["hostname"],
                 overall_status=overall_status,
                 score=score,
+                checks=checks,
                 execution_time_seconds=execution_time,
                 discovery_info={
                     "os": os_info,
@@ -559,7 +618,8 @@ class RecoveryValidationAgent:
                 ),
                 credential_source=CredentialSource.USER_PROVIDED,
                 auto_discover=True,
-                send_email=False
+                send_email=bool(email_recipient),
+                email_recipient=email_recipient
             )
             
             report = ValidationReport(
@@ -567,24 +627,139 @@ class RecoveryValidationAgent:
                 result=validation_result
             )
             
-            # Add recommendations
-            write_progress("💡 Generating recommendations...")
-            report.recommendations = self.report_generator.generate_recommendations(report)
+            # Store the detailed report for email
+            detailed_report_text = None
             
-            # Display summary
-            write_progress("\n" + "=" * 60)
-            write_progress("VALIDATION SUMMARY")
-            write_progress("=" * 60)
-            write_progress(f"Hostname: {ssh_creds['hostname']}")
-            write_progress(f"OS: {os_info.get('distribution', 'Unknown')} {os_info.get('version', '')}")
-            write_progress(f"Applications: {len(discovered_apps)}")
-            write_progress(f"Validations: {successful}/{len(validation_results)} passed")
-            write_progress(f"Overall Status: {overall_status.value}")
-            write_progress(f"Score: {score}/100")
-            write_progress("=" * 60)
+            # Try to use AI-powered reporting agent if available
+            try:
+                from agents.reporting_agent import ReportingAgent
+                from feature_flags import FeatureFlags
+                
+                # Check if AI reporting is enabled
+                feature_flags = FeatureFlags()
+                if feature_flags.is_enabled("ai_reporting"):
+                    write_progress("💡 Using AI-powered report generation...")
+                    logger.info("🎭 report_generation_agent - AI reporting enabled")
+                    
+                    reporting_agent = ReportingAgent()
+                    
+                    # Convert discovered apps to WorkloadDiscoveryResult format
+                    from models import WorkloadDiscoveryResult, ApplicationDetection
+                    
+                    # Helper function to convert confidence to float
+                    def convert_confidence(conf_value):
+                        """Convert confidence value to float, handling string values."""
+                        if isinstance(conf_value, (int, float)):
+                            return float(conf_value)
+                        if isinstance(conf_value, str):
+                            # Map string confidence levels to numeric values
+                            confidence_map = {
+                                'critical': 0.95, 'highest': 0.95,
+                                'high': 0.8,
+                                'medium': 0.6, 'normal': 0.6,
+                                'low': 0.4,
+                                'lowest': 0.2, 'info': 0.2
+                            }
+                            return confidence_map.get(conf_value.lower().strip(), 0.5)
+                        return 0.5  # Default fallback
+                    
+                    discovery_result = WorkloadDiscoveryResult(
+                        host=ssh_creds["hostname"],
+                        applications=[
+                            ApplicationDetection(
+                                name=app.get("name", "unknown"),
+                                version=app.get("version"),
+                                confidence=convert_confidence(app.get("confidence", 0.5)),
+                                detection_method=app.get("detection_method", "signature"),
+                                evidence=app.get("evidence", {})
+                            )
+                            for app in discovered_apps
+                        ]
+                    )
+                    
+                    # Generate AI-powered report
+                    detailed_report = await reporting_agent.generate_report(
+                        validation_result=validation_result,
+                        discovery_result=discovery_result,
+                        classification=None,
+                        evaluation=None,
+                        format="markdown"
+                    )
+                    
+                    write_progress("✓ AI-powered report generated successfully")
+                    logger.info("🎭 report_generation_agent - Report generation complete")
+                    
+                    # Store detailed report for email
+                    detailed_report_text = detailed_report
+                    
+                    # Display the detailed report
+                    write_progress("\n" + "=" * 60)
+                    write_progress("COMPREHENSIVE VALIDATION REPORT")
+                    write_progress("=" * 60)
+                    write_progress(detailed_report)
+                else:
+                    logger.info("🎭 report_generation_agent - AI reporting disabled, using template")
+                    write_progress("💡 Generating recommendations (AI reporting disabled)...")
+                    report.recommendations = self.report_generator.generate_recommendations(report)
+                    
+                    # Display basic summary when AI reporting is disabled
+                    write_progress("\n" + "=" * 60)
+                    write_progress("VALIDATION SUMMARY")
+                    write_progress("=" * 60)
+                    write_progress(f"Hostname: {ssh_creds['hostname']}")
+                    write_progress(f"OS: {os_info.get('distribution', 'Unknown')} {os_info.get('version', '')}")
+                    write_progress(f"Applications: {len(discovered_apps)}")
+                    write_progress(f"Validations: {successful}/{len(validation_results)} passed")
+                    write_progress(f"Overall Status: {overall_status.value}")
+                    
+            except Exception as e:
+                import traceback
+                logger.error(f"🎭 report_generation_agent - Full error traceback:")
+                logger.error(traceback.format_exc())
+                logger.warning(f"🎭 report_generation_agent - AI reporting failed: {e}, falling back to template")
+                write_progress(f"⚠ AI reporting unavailable, using template-based report")
+                report.recommendations = self.report_generator.generate_recommendations(report)
+                
+                # Display basic summary on fallback
+                write_progress("\n" + "=" * 60)
+                write_progress("VALIDATION SUMMARY")
+                write_progress("=" * 60)
+                write_progress(f"Hostname: {ssh_creds['hostname']}")
+                write_progress(f"OS: {os_info.get('distribution', 'Unknown')} {os_info.get('version', '')}")
+                write_progress(f"Applications: {len(discovered_apps)}")
+                write_progress(f"Validations: {successful}/{len(validation_results)} passed")
+                write_progress(f"Overall Status: {overall_status.value}")
+                write_progress("=" * 60)
             
             execution_time = time.time() - start_time
             write_progress(f"\n✓ Total execution time: {execution_time:.2f} seconds")
+            
+            # Send email if requested
+            if email_recipient:
+                write_progress(f"\n📧 Sending report to {email_recipient}...")
+                try:
+                    # Send detailed report if available, otherwise use basic template
+                    if detailed_report_text:
+                        email_sent = self.email_service.send_detailed_report(
+                            detailed_report_text,
+                            recipient=email_recipient,
+                            subject=f"Recovery Validation Report - {ssh_creds['hostname']} - {overall_status.value}",
+                            resource_host=ssh_creds['hostname']
+                        )
+                    else:
+                        email_sent = self.email_service.send_validation_report(
+                            report,
+                            email_recipient
+                        )
+                    if email_sent:
+                        write_progress("✓ Email report sent successfully")
+                        logger.info(f"Email report sent to {email_recipient}")
+                    else:
+                        write_progress("⚠ Failed to send email report")
+                        logger.warning(f"Failed to send email to {email_recipient}")
+                except Exception as e:
+                    write_progress(f"⚠ Email error: {e}")
+                    logger.error(f"Error sending email: {e}")
             
             return report
             
@@ -624,9 +799,14 @@ class RecoveryValidationAgent:
                     reader.write("Agent 🤖", "Validation cancelled. Goodbye! 👋")
                     break
                 
-                # Parse input to extract hostname and credentials
+                # Parse input to extract hostname, email, and credentials
                 parsed = await self.conversation_handler.parse_initial_input(user_input)
                 host = parsed.get("host")
+                email_recipient = parsed.get("email_recipient")
+                
+                # Use email from input or fall back to default
+                if not email_recipient:
+                    email_recipient = self.default_email_recipient
                 
                 if not host:
                     reader.write(
@@ -689,20 +869,26 @@ class RecoveryValidationAgent:
                         "password": ssh_password
                     }
                     
-                    reader.write(
-                        "Agent 🤖",
+                    # Build confirmation message
+                    confirmation_msg = (
                         f"Perfect! I have all the information I need.\n\n"
                         f"I will now:\n"
                         f"1. Discover the operating system\n"
                         f"2. Discover all applications (including Oracle, MongoDB, etc.)\n"
                         f"3. Select appropriate validation tools\n"
                         f"4. Run comprehensive validations\n"
-                        f"5. Generate a detailed report\n\n"
-                        f"Starting validation..."
+                        f"5. Generate a detailed report\n"
                     )
                     
-                    # Run MCP-centric validation
-                    report = await self.run_mcp_centric_validation(ssh_creds, reader)
+                    if email_recipient:
+                        confirmation_msg += f"6. Send report to {email_recipient}\n"
+                    
+                    confirmation_msg += "\nStarting validation..."
+                    
+                    reader.write("Agent 🤖", confirmation_msg)
+                    
+                    # Run MCP-centric validation with email
+                    report = await self.run_mcp_centric_validation(ssh_creds, reader, email_recipient)
                     
                     # Ask if user wants to validate another resource
                     reader.write(

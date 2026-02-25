@@ -117,7 +117,7 @@ Be thorough but efficient - only scan what's necessary."""
         return result
     
     async def _create_plan(self, resource: ResourceInfo) -> DiscoveryPlan:
-        """Create discovery plan using AI.
+        """Create discovery plan using AI with Chain-of-Thought reasoning.
         
         Args:
             resource: Resource information
@@ -125,19 +125,64 @@ Be thorough but efficient - only scan what's necessary."""
         Returns:
             DiscoveryPlan
         """
-        prompt = f"""Create a discovery plan for this resource:
+        # Fast-path for simple VM discovery (Day 3 optimization)
+        if (resource.resource_type.value == "vm" and
+            not hasattr(resource, 'required_services') or
+            (hasattr(resource, 'required_services') and not resource.required_services)):
+            
+            logger.info("Using fast-path discovery plan (simple VM)")
+            return DiscoveryPlan(
+                scan_ports=True,
+                scan_processes=True,
+                detect_applications=True,
+                reasoning="Standard VM discovery (fast-path - no LLM needed for simple cases)"
+            )
+        
+        # Use LLM with Chain-of-Thought for complex cases
+        logger.info("Using AI-powered discovery planning with Chain-of-Thought")
+        
+        prompt = f"""# Discovery Planning Task with Chain-of-Thought Reasoning
 
-Host: {resource.host}
-Type: {resource.resource_type}
-SSH User: {resource.ssh_user}
-SSH Port: {resource.ssh_port}
+## Resource Context
+- **Host**: {resource.host}
+- **Type**: {resource.resource_type.value}
+- **SSH Access**: {resource.ssh_user}@{resource.host}:{resource.ssh_port}
 
-Consider:
-- What discovery methods are most appropriate?
-- What information would be most valuable?
-- How to be efficient while thorough?
+## Available Discovery Methods
+1. **Port Scanning**: Identify open ports and services (fast, non-invasive)
+2. **Process Scanning**: List running processes (requires SSH, more detailed)
+3. **Application Detection**: Identify applications from ports/processes (intelligent analysis)
 
-Provide a plan with reasoning."""
+## Your Task: Create Discovery Plan with Step-by-Step Reasoning
+
+Please think through this step-by-step:
+
+### Step 1: Resource Analysis
+What do we know about this resource? What type of workload might it run?
+
+### Step 2: Discovery Goals
+What specific information would be most valuable to discover?
+
+### Step 3: Method Selection
+Which discovery methods should we use and why?
+
+### Step 4: Efficiency Considerations
+How can we balance thoroughness with execution time?
+
+### Step 5: Final Decision
+Based on the above reasoning, what's your discovery plan?
+
+## Example Reasoning:
+```
+Step 1: This is a VM with SSH access. General-purpose server.
+Step 2: Need to identify running applications and services.
+Step 3: Use all three methods for comprehensive discovery.
+Step 4: Run port scan first (fast), then processes, then detection.
+Step 5: Plan: scan_ports=true, scan_processes=true, detect_applications=true
+Reasoning: Comprehensive discovery needed for unknown VM.
+```
+
+Now provide YOUR reasoning and plan."""
         
         try:
             result = await self.planning_agent.run(prompt)
@@ -149,7 +194,7 @@ Provide a plan with reasoning."""
                 scan_ports=True,
                 scan_processes=True,
                 detect_applications=True,
-                reasoning="Default plan: comprehensive discovery"
+                reasoning="Default plan: comprehensive discovery (AI failed)"
             )
     
     async def _execute_discovery(
