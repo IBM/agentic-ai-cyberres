@@ -4,203 +4,438 @@ Copyright contributors to the agentic-ai-cyberres project
 
 # CyberRes MCP Server
 
+MCP server for post-recovery validation of Linux VMs, Oracle databases, and MongoDB deployments.
 
-## 🚀 Quick Start
+## What This Server Does
 
-Get up and running in 3 steps:
+- Validates connectivity and runtime health
+- Performs recovery-readiness checks for Oracle and Mongo workloads
+- Supports SSH-first operation for environments where DB ports are not externally reachable
+- Provides acceptance resources and prompt templates for agent workflows
 
-### 1. Install Dependencies
+## Tool Count
+
+- 24 tools
+- 3 resources
+- 3 prompts
+
+## Quick Start
+
+1. Install dependencies:
 
 ```bash
-cd python/cyberres-mcp/
+cd python/cyberres-mcp
 uv add . --dev
 ```
 
-### 2. Configure Environment
+2. Configure:
 
 ```bash
-# Copy example files
 cp .env.example .env
 cp secrets.example.json secrets.json
-
-# Edit secrets.json with your infrastructure credentials
+# Edit secrets.json for your environment
 ```
 
-### 3. Start the Server
+3. Start server:
 
 ```bash
-# Run the MCP server
 uv run cyberres-mcp
 ```
 
-The server will start on `http://0.0.0.0:8000` by default.
+Default endpoint (streamable-http): `http://0.0.0.0:8000/mcp`
 
-## 📋 Prerequisites
+## Configuration
 
-- Python 3.13 or higher installed on your system
-- Network access to target infrastructure (VMs, databases)
-- Node.js and npm (for MCP inspector client)
-
-## 🏗️ Architecture
-
-```
-┌─────────────────┐
-│   MCP Client    │  (AI Agent, Inspector, Custom App)
-│  (Claude, etc)  │
-└────────┬────────┘
-         │ MCP Protocol (HTTP/SSE)
-         │
-┌────────▼────────┐
-│   MCP Server    │
-│  (FastMCP)      │
-├─────────────────┤
-│  • Tools        │  13 validation tools
-│  • Resources    │  3 acceptance profiles
-│  • Prompts      │  3 agent prompts
-└────────┬────────┘
-         │
-    ┌────┴────┬────────┬─────────┐
-    │         │        │         │
-┌───▼───┐ ┌──▼──┐ ┌───▼────┐ ┌──▼────┐
-│Network│ │ VM  │ │Oracle  │ │MongoDB│
-│Plugin │ │Plugin│ │Plugin  │ │Plugin │
-└───┬───┘ └──┬──┘ └───┬────┘ └──┬────┘
-    │        │        │         │
-    └────────┴────────┴─────────┘
-              │
-    ┌─────────▼──────────┐
-    │  Infrastructure    │
-    │  • VMs (SSH)       │
-    │  • Oracle DBs      │
-    │  • MongoDB Clusters│
-    └────────────────────┘
-```
-
-## 🛠️ Available Tools
-
-### Network Tools
-- `tcp_portcheck` - Check TCP connectivity to ports
-
-### VM Linux Tools
-- `vm_linux_uptime_load_mem` - Get uptime, load, and memory info
-- `vm_linux_fs_usage` - Get filesystem usage statistics
-- `vm_linux_services` - Check systemd services status
-- `vm_validator` - Legacy VM validation (backwards compatible)
-
-### Oracle Database Tools
-- `db_oracle_connect` - Connect and get instance info
-- `db_oracle_tablespaces` - Get tablespace usage
-- `db_oracle_discover_and_validate` - Discover and validate via SSH
-
-### MongoDB Tools
-- `db_mongo_connect` - Connect and verify connectivity
-- `db_mongo_rs_status` - Get replica set status
-- `db_mongo_ssh_ping` - SSH-based ping command
-- `db_mongo_ssh_rs_status` - SSH-based replica set status
-- `validate_collection` - Validate collection integrity
-
-### Server Tools
-- `server_health` - Check server health and capabilities
-
-## 📚 Resources
-
-The server exposes acceptance criteria profiles:
-- `resource://acceptance/vm-core` - VM validation thresholds
-- `resource://acceptance/db-oracle` - Oracle DB thresholds
-- `resource://acceptance/db-mongo` - MongoDB thresholds
-
-## 🤖 Prompts
-
-Agent orchestration prompts:
-- `planner` - Generate validation plan from request
-- `evaluator` - Evaluate results against acceptance criteria
-- `summarizer` - Generate executive summary
-
-## ⚙️ Configuration
-
-### Environment Variables
-
-Create a `.env` file or set environment variables:
+Environment variables from `.env`:
 
 ```bash
-MCP_HOST=0.0.0.0          # Host to bind server
-MCP_PORT=8000             # Port to listen on
-MCP_TRANSPORT=streamable-http  # Transport protocol
-SECRETS_FILE=secrets.json # Path to secrets file
+MCP_HOST=0.0.0.0
+MCP_PORT=8000
+MCP_TRANSPORT=streamable-http
+SECRETS_FILE=secrets.json
+
+# SSH host-key security
+SSH_STRICT_HOST_KEY_CHECKING=true
+SSH_TRUST_UNKNOWN_HOSTS=false
+# SSH_KNOWN_HOSTS_FILE=/Users/you/.ssh/known_hosts
 ```
 
-### Secrets File
+### SSH Security Behavior
 
-Create `secrets.json` with infrastructure credentials:
+- Loads system host keys by default
+- Uses strict host-key checking by default (`RejectPolicy`)
+- Optional TOFU only when `SSH_TRUST_UNKNOWN_HOSTS=true`
+- Optional explicit known_hosts file via `SSH_KNOWN_HOSTS_FILE`
+
+## Credentials and `credential_id`
+
+Most SSH/DB tools support either:
+
+- Direct parameters (`ssh_user`, `ssh_password`, etc.), or
+- `credential_id` resolved from `secrets.json`
+
+Example `secrets.json`:
 
 ```json
 {
-  "vm.example": {
-    "ssh": {"username": "admin", "password": "secret"}
+  "vm-prod": {
+    "ssh": {
+      "username": "admin",
+      "password": "REDACTED",
+      "key_path": "/home/admin/.ssh/id_rsa"
+    }
   },
-  "oracle.example": {
-    "dsn": "10.0.2.20/ORCLCDB",
-    "user": "system",
-    "password": "oracle123"
+  "oracle-ssh-prod": {
+    "ssh": {
+      "username": "root",
+      "password": "REDACTED"
+    },
+    "oracle": {
+      "username": "system",
+      "password": "REDACTED"
+    }
   },
-  "mongo.example": {
-    "uri": "mongodb://admin:pass@10.0.2.30:27017/admin"
+  "mongo-prod": {
+    "ssh": {
+      "username": "admin",
+      "password": "REDACTED"
+    },
+    "mongo": {
+      "username": "mongo_admin",
+      "password": "REDACTED"
+    }
   }
 }
 ```
 
-**Security Notes:**
-- Secrets file is loaded at startup
-- Sensitive data is automatically redacted in logs
-- Use environment-specific secrets files
-- Consider encrypting secrets at rest for production
+## Response Envelope
 
-## 📖 Response Format
+Success:
 
-All tools return a standardized envelope:
-
-**Success:**
 ```json
 {
   "ok": true,
-  "...": "tool-specific data"
+  "...": "tool-specific payload"
 }
 ```
 
-**Error:**
+Error:
+
 ```json
 {
   "ok": false,
   "error": {
-    "message": "Descriptive error message",
+    "message": "Descriptive error",
     "code": "ERROR_CODE"
-  }
-}
-
-
-### How to Provide Credentials
-
-Credentials are passed as parameters in each tool call:
-
-```json
-{
-  "tool": "vm_linux_uptime_load_mem",
-  "args": {
-    "host": "10.0.1.5",
-    "username": "admin",
-    "password": "secret123"
   }
 }
 ```
 
+## Tool Catalog
 
----
+### Network
 
-## 🖥️ Claude Desktop Integration
+- `tcp_portcheck`
 
-### Quick Setup
+### VM Linux
 
-1. **Add to Claude Desktop config** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+- `vm_linux_uptime_load_mem`
+- `vm_linux_fs_usage`
+- `vm_linux_services`
+- `vm_validator` (legacy)
+
+### Oracle
+
+- `db_oracle_connect`
+- `db_oracle_tablespaces`
+- `db_oracle_data_validation`
+- `db_oracle_discover_and_validate`
+- `db_oracle_discover_config`
+
+### MongoDB
+
+- `db_mongo_connect`
+- `db_mongo_rs_status`
+- `db_mongo_ssh_ping` (alias)
+- `db_mongo_ssh_rs_status` (alias)
+- `validate_collection`
+
+### Workload Discovery
+
+- `discover_os_only`
+- `discover_applications`
+- `get_raw_server_data`
+- `discover_workload` (currently pending implementation)
+
+### Server Utilities
+
+- `server_health`
+- `list_resources`
+- `get_resource`
+- `list_prompts`
+- `get_prompt`
+
+## How Each Tool Is Implemented
+
+## 1. Network Tool
+
+### `tcp_portcheck`
+
+Implementation:
+- Uses Python `socket.create_connection((host, port), timeout)` per requested port
+- Measures latency in milliseconds for each attempt
+- Returns per-port status and aggregate `all_ok`
+
+## 2. VM Linux Tools
+
+All VM tools run remote commands via shared SSH utility (`ssh_utils.SSHExecutor`) and support `credential_id`.
+
+### `vm_linux_uptime_load_mem`
+
+Implementation:
+- Executes:
+  - `uptime`
+  - `cat /proc/meminfo | egrep 'MemTotal|MemFree|MemAvailable|SwapTotal|SwapFree'`
+- Returns raw output (`stdout`) plus exit status
+
+### `vm_linux_fs_usage`
+
+Implementation:
+- Executes `df -P -k`
+- Parses POSIX output into structured fields:
+  - `filesystem`, `blocks_k`, `used_k`, `avail_k`, `use_pct`, `mountpoint`
+
+### `vm_linux_services`
+
+Implementation:
+- Executes:
+  - `systemctl list-units --type=service --state=running --no-legend --no-pager | awk '{print $1}'`
+- Compares discovered running services against `required`
+- Fails with `SERVICE_CHECK_FAILED` when required services are missing
+
+### `vm_validator` (legacy)
+
+Implementation:
+- Executes:
+  - `df -h /`
+  - `systemctl is-active sshd || true`
+- Returns `PASS` only when disk command succeeds and sshd is active
+
+## 3. Oracle Tools
+
+Oracle SSH-based tools use this execution model:
+
+- Discover runtime details from remote host (PMON/listener/config)
+- Execute SQL through remote `sqlplus` using OS-auth (`/ as sysdba`)
+- Optionally run as oracle OS user (`sudo_oracle=true`)
+
+### Oracle SSH helper behavior
+
+Implementation details:
+- Remote discovery steps:
+  - PMON process scan (`ps -ef ... ora_pmon_...`) for SID inference
+  - `lsnrctl status/services` parsing for services and ports
+  - Fallback reads of `listener.ora` and `tnsnames.ora`
+- SQLPlus bootstrap on remote host:
+  - Finds `sqlplus` in PATH/ORACLE_HOME/common install locations
+  - Sets `ORACLE_HOME`, PATH, LD library path
+  - Infers `ORACLE_SID` from PMON if not set
+  - Sources `oraenv` when available
+
+### `db_oracle_connect`
+
+Implementation:
+- Runs SQL on remote host:
+  - `v$instance` + `v$database`
+- Returns `instance_name`, `version`, `open_mode`, `database_role`
+- Includes discovery metadata and candidate DSNs
+
+### `db_oracle_tablespaces`
+
+Implementation:
+- Runs SQL aggregating `dba_data_files` and `dba_free_space`
+- Computes per-tablespace:
+  - `used_pct`
+  - `free_mb`
+- Orders descending by usage
+
+### `db_oracle_data_validation`
+
+Implementation:
+- Core SQL checks collect:
+  - `open_mode`, `database_role`, `log_mode`
+  - files requiring recovery (`v$recover_file`)
+  - block corruption (`v$database_block_corruption`)
+  - offline/problem datafiles (`v$datafile`, `v$datafile_header`)
+  - invalid objects (`dba_objects`)
+  - critical tablespace pressure (`>=95%`)
+  - archive destination errors (`v$archive_dest`)
+- Additional best-effort checks:
+  - backup recency from `v$rman_backup_job_details`
+  - archived log freshness from `v$archived_log`
+- Produces check list with `PASS|WARN|FAIL`, metrics, and `production_ready`
+
+### `db_oracle_discover_and_validate`
+
+Implementation:
+- Performs remote SID/service/port discovery over SSH
+- Builds candidate DSNs
+- If Oracle credentials are provided, attempts direct DB login (`oracledb.connect`) against discovered DSNs and returns first successful validation
+
+### `db_oracle_discover_config`
+
+Implementation:
+- Direct DB login mode (not SSH-shell SQLPlus mode)
+- Resolves Oracle auth via args or `credential_id`
+- Tries DSN from `service`/`sid` or common service names
+- Collects comprehensive configuration:
+  - instance/database metadata
+  - tablespaces
+  - memory
+  - parameters
+  - datafiles/redo/archive details
+
+## 4. MongoDB Tools
+
+Mongo tools are SSH-first and execute local shell commands (`mongosh`/`mongo`) on the target host.
+
+### Mongo runtime discovery behavior
+
+Implementation details:
+- Detects shell binary (`mongosh` then `mongo`)
+- Detects runtime command line from `ps -eo args | awk '/[m]ongod/'`
+- Infers:
+  - port (`--port` or config parse fallback)
+  - replSet name (`--replSet` or config parse fallback)
+- Config fallback files:
+  - `/etc/mongod.conf`
+  - `/etc/mongodb.conf`
+  - `/usr/local/etc/mongod.conf`
+
+### Mongo auth handling in SSH mode
+
+Implementation details:
+- First tries local no-auth execution
+- If auth fails and credentials are available, retries in credentialed mode
+- Credentialed mode avoids password in command args:
+  - passes auth/eval script via SSH stdin
+- Parses JSON from shell output and normalizes errors
+
+### `db_mongo_connect`
+
+Implementation:
+- Runs shell JS to fetch:
+  - `db.adminCommand({ping:1})`
+  - `buildInfo.version`
+  - `hello` (fallback `isMaster`)
+- Returns ping/version/hello and discovery details
+
+### `db_mongo_rs_status`
+
+Implementation:
+- Runs `JSON.stringify(rs.status())`
+- Returns set, state, members, raw status
+- Error classification includes:
+  - `MONGO_NOT_REPLSET` (standalone mongod)
+  - `MONGO_REPLSET_UNINITIALIZED`
+  - `MONGO_AUTH_ERROR`
+
+### `db_mongo_ssh_ping`
+
+Implementation:
+- Backward-compatible alias for `db_mongo_connect`
+- Routed to shared internal implementation
+
+### `db_mongo_ssh_rs_status`
+
+Implementation:
+- Backward-compatible alias for `db_mongo_rs_status`
+- Routed to shared internal implementation
+
+### `validate_collection`
+
+Implementation:
+- Runs:
+  - `db.getSiblingDB(<db>).getCollection(<collection>).validate({full:<bool>})`
+- Returns raw validate payload plus normalized highlights (`errors`, `warnings`, index/record counters when present)
+
+## 5. Workload Discovery Tools
+
+All discovery tools support SSH credentials or `credential_id`.
+
+### `discover_os_only`
+
+Implementation:
+- Builds `DiscoveryRequest`
+- Uses `OSDetector.detect(...)`
+- Returns structured OS profile (type/distribution/version/kernel/confidence)
+
+### `discover_applications`
+
+Implementation:
+- Builds `DiscoveryRequest`
+- Uses `ApplicationDetector.detect(...)`
+- Applies confidence filtering (`high|medium|low|uncertain`)
+- Returns app inventory + detection validation summary
+
+### `get_raw_server_data`
+
+Implementation:
+- Uses `RawDataCollector` and selected flags:
+  - processes (`ps aux`)
+  - listening ports (`netstat -tulpn` fallback `ss -tulpn`)
+  - configs (`cat -- <quoted_path>`) [shell-quoted path handling]
+  - packages (`rpm -qa` fallback `dpkg -l`)
+  - services (`systemctl list-units` fallback `service --status-all`)
+
+### `discover_workload`
+
+Implementation status:
+- Currently returns `pending_implementation`
+- Intended as integrated multi-stage discovery entry point
+
+## 6. Server Utility Tools
+
+### `server_health`
+
+Implementation:
+- Returns health, version, plugin list, capability counts
+
+### `list_resources`
+
+Implementation:
+- Returns built-in acceptance resource descriptors
+
+### `get_resource`
+
+Implementation:
+- Returns JSON content for one acceptance resource URI
+
+### `list_prompts`
+
+Implementation:
+- Lists bundled orchestration prompt templates
+
+### `get_prompt`
+
+Implementation:
+- Returns content of one named prompt template
+
+## Resources
+
+- `resource://acceptance/vm-core`
+- `resource://acceptance/db-oracle`
+- `resource://acceptance/db-mongo`
+
+## Prompts
+
+- `planner`
+- `evaluator`
+- `summarizer`
+
+## Claude Desktop Setup (stdio)
+
+`~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -209,7 +444,7 @@ Credentials are passed as parameters in each tool call:
       "command": "uv",
       "args": [
         "--directory",
-        "/path/to/cyberres-mcp",
+        "/absolute/path/to/python/cyberres-mcp",
         "run",
         "cyberres-mcp"
       ],
@@ -221,212 +456,35 @@ Credentials are passed as parameters in each tool call:
 }
 ```
 
-2. **Restart Claude Desktop**
+Restart Claude Desktop after changes.
 
-3. **Start using tools** - Claude will discover all 13 tools automatically!
-
-### Example Usage with Claude
-
-Simply ask Claude in natural language:
-
-```
-Please validate the VM at 10.0.1.5 
-Check uptime, memory, disk usage, and verify sshd and nginx are running.
-```
-
-Claude will automatically:
-- Call the appropriate tools
-- Chain multiple validations
-- Provide a comprehensive summary
-
-
----
-
-## 🔌 Connecting with MCP Inspector
-
-### 1. Start the MCP Inspector
+## MCP Inspector Setup
 
 ```bash
 npx @modelcontextprotocol/inspector
 ```
 
-This opens the inspector UI at `http://localhost:6274`
+- Transport: `streamable-http`
+- URL: `http://localhost:8000/mcp` (or remote host)
 
-### 2. Configure Connection
+## Troubleshooting
 
-In the MCP Inspector:
-1. Set transport to **`streamable-http`**
-2. Enter server URL: `http://<server-ip>:8000/mcp`
-   - Local: `http://localhost:8000/mcp`
+- SSH host key failures:
+  - Add host key to known_hosts, or intentionally set `SSH_TRUST_UNKNOWN_HOSTS=true`
+- Oracle SQLPlus errors (`SP2-0667`, `SP2-0750`):
+  - Fix `ORACLE_HOME`/message files on remote host; try `sudo_oracle=true`
+- Mongo `MONGO_NOT_REPLSET`:
+  - Node is standalone; use `db_mongo_connect` and `validate_collection` instead of replica-set status
+- `credential_id` not found:
+  - Verify `SECRETS_FILE` path and key name in `secrets.json`
 
-3. Click **Connect**
+## Security Notes
 
-### 3. Verify Connection
+- Do not commit `secrets.json`
+- Sensitive fields are redacted in logs
+- Mongo credentialed SSH mode avoids passing passwords in command arguments
+- Raw config path collection now uses shell-quoted paths
 
-Once connected, you should see:
-- ✅ 13 available tools
-- ✅ 3 resources
-- ✅ 3 prompts
+## License
 
-Test the connection:
-```json
-{
-  "tool": "server_health",
-  "args": {}
-}
-```
-
-## 💡 Usage Examples
-
-### Example 1: Validate a Linux VM
-
-```json
-{
-  "tool": "vm_linux_uptime_load_mem",
-  "args": {
-    "host": "10.0.1.5",
-    "username": "admin",
-    "password": "secret123"
-  }
-}
-```
-
-### Example 2: Check Oracle Database
-
-```json
-{
-  "tool": "db_oracle_connect",
-  "args": {
-    "dsn": "10.0.2.20/ORCLCDB",
-    "user": "system",
-    "password": "oracle123"
-  }
-}
-```
-
-### Example 3: Validate MongoDB Replica Set
-
-```json
-{
-  "tool": "db_mongo_rs_status",
-  "args": {
-    "uri": "mongodb://admin:pass@mongo-rs-01:27017/admin?replicaSet=rs0"
-  }
-}
-```
-
-
-## 🎯 Demo Scenarios
-
-Pre-configured validation scenarios are available in [`demo/example-requests.json`](demo/example-requests.json):
-
-- **VM Validation**: Basic health checks and service verification
-- **Oracle Validation**: Database connectivity and tablespace usage
-- **MongoDB Validation**: Connectivity and replica set status
-
-## 🐛 Troubleshooting
-
-### Server won't start
-```bash
-# Check if port is already in use
-lsof -i :8000
-
-# Try a different port
-MCP_PORT=8001 uv run cyberres-mcp
-```
-
-### Connection refused from inspector
-- Verify server is running: `curl http://localhost:8000/health`
-- Check firewall rules allow port 8000
-- Ensure correct server URL in inspector
-
-### SSH authentication fails
-- Verify credentials in secrets.json
-- Test SSH manually: `ssh user@host`
-- Check SSH key permissions: `chmod 600 ~/.ssh/id_rsa`
-
-### Database connection fails
-- Verify database is accessible: `telnet host port`
-- Check credentials and DSN format
-- Ensure database listener is running
-
-## 🔒 Security Best Practices
-
-1. **Credentials Management**
-   - Never commit `secrets.json` to version control
-   - Use environment-specific secrets files
-   - Rotate credentials regularly
-
-2. **Network Security**
-   - Run server behind firewall
-   - Use VPN for remote access
-   - Consider TLS/SSL for production
-
-3. **Access Control**
-   - Limit SSH key distribution
-   - Use least-privilege database accounts
-   - Monitor server logs for suspicious activity
-
-## 📊 Monitoring
-
-Server logs include structured information:
-```
-2024-02-05 10:30:15 INFO mcp.server Loaded secrets file path=/path/to/secrets.json keys=['vm.example', 'oracle.example']
-2024-02-05 10:30:20 INFO mcp.vm uptime_load_mem succeeded host=10.0.1.5
-2024-02-05 10:30:25 WARNING mcp.oracle oracle_connect failed error=ORA-12154: TNS:could not resolve the connect identifier
-```
-
-Sensitive data is automatically redacted in logs.
-
-## 🚀 Next Steps
-
-1. **Review Documentation**
-   - Read [`demo/tool-examples.md`](demo/tool-examples.md) for detailed tool usage
-   - Check [`prompts/`](prompts/) for agent orchestration patterns
-
-2. **Try Demo Scenarios**
-   - Use example requests from [`demo/example-requests.json`](demo/example-requests.json)
-   - Test with your own infrastructure
-
-3. **Integrate with AI Agents**
-   - Connect Claude or other MCP-compatible clients
-   - Build automated validation workflows
-   - Create custom orchestration logic
-
-## 📝 Contributing
-
-Contributions are welcome! Areas for improvement:
-- Additional database support (PostgreSQL, MySQL)
-- Windows VM validation
-- Container orchestration (Kubernetes)
-- Enhanced monitoring and metrics
-
-## 📄 License
-
-See [LICENSE](../../LICENSE) file for details.
-```
-
-## Connecting from Local Browser
-
-1. **Install the MCP inspector tool (if not already installed):**
-
-   ```bash
-   npx @modelcontextprotocol/inspector
-   ```
-
-2. **Open the MCP inspector UI in your browser.**
-    ```
-    http://localhost:6274/?MCP_PROXY_AUTH_TOKEN=<TOKEN>
-    ```
-
-3. **Set the transport to `streamable-http` in the MCP inspector.**
-
-4. **Add the server URL in the MCP inspector:**
-
-   Use the URL of your  server, for example:
-
-   ```
-   http://<server-ip>:8000/mcp
-   ```
-
-5. Click **Connect**
+See [LICENSE](../../LICENSE).

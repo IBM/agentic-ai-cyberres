@@ -14,8 +14,11 @@ from .plugins import vms_validator, oracle_db, mongo_db, net, workload_discovery
 
 def create_app() -> FastMCP:
     """Create and configure a FastMCP instance with tools and resources."""
-    # basic structured logging setup
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    # Respect LOG_LEVEL env var so the parent process can suppress noisy output.
+    # Default to WARNING so SSH/paramiko/MCP internals don't flood the console.
+    _log_level_name = os.getenv("LOG_LEVEL", "WARNING").upper()
+    _log_level = getattr(logging, _log_level_name, logging.WARNING)
+    logging.basicConfig(level=_log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
     class SensitiveDataFilter(logging.Filter):
         """Redact sensitive values in log records.
@@ -53,8 +56,15 @@ def create_app() -> FastMCP:
                     record.__dict__[k] = safe
             return True
 
+    root_logger = logging.getLogger()
+    if not any(isinstance(f, SensitiveDataFilter) for f in root_logger.filters):
+        root_logger.addFilter(SensitiveDataFilter())
+    for handler in root_logger.handlers:
+        if not any(isinstance(f, SensitiveDataFilter) for f in handler.filters):
+            handler.addFilter(SensitiveDataFilter())
     logger = logging.getLogger("mcp.server")
-    logger.addFilter(SensitiveDataFilter())
+    if not any(isinstance(f, SensitiveDataFilter) for f in logger.filters):
+        logger.addFilter(SensitiveDataFilter())
 
     # load secrets file if present
     secrets = {}
@@ -74,34 +84,15 @@ def create_app() -> FastMCP:
         instructions=(
             "Validates recovered infrastructure resources including Linux VMs, "
             "Oracle databases, and MongoDB clusters. Exposes tools to check "
-            "network connectivity, OS health, database connectivity, and "
-            "replica status."
+            "network connectivity, OS health, database connectivity, "
+            "data integrity, replica status, and workload discovery."
         ),
     )
 
     # Add health check tool
     @app.tool()
     def server_health() -> dict:
-        """Check MCP server health and list available capabilities.
-        
-        Returns server status, version, and counts of available tools,
-        resources, and prompts. Useful for verifying server connectivity
-        and discovering capabilities.
-        
-        Example:
-            >>> server_health()
-            {
-                "ok": true,
-                "status": "healthy",
-                "version": "0.1.0",
-                "plugins": ["network", "vm_linux", "oracle_db", "mongodb"],
-                "capabilities": {
-                    "tools": 13,
-                    "resources": 3,
-                    "prompts": 3
-                }
-            }
-        """
+        """[Server] Report MCP server health and advertised capabilities."""
         from .plugins.utils import ok
         
         return ok({
@@ -109,7 +100,7 @@ def create_app() -> FastMCP:
             "version": "0.1.0",
             "plugins": ["network", "vm_linux", "oracle_db", "mongodb", "workload_discovery"],
             "capabilities": {
-                "tools": 21,
+                "tools": 24,
                 "resources": 3,
                 "prompts": 3
             },
@@ -119,11 +110,7 @@ def create_app() -> FastMCP:
     # Add tools to access resources and prompts
     @app.tool()
     def list_resources() -> dict:
-        """List all available acceptance criteria resources.
-        
-        Returns a list of available resource URIs and their descriptions.
-        These resources define acceptance criteria for validation.
-        """
+        """[Server] List built-in acceptance-criteria resources."""
         from .plugins.utils import ok
         
         return ok({
@@ -148,7 +135,7 @@ def create_app() -> FastMCP:
     
     @app.tool()
     def get_resource(resource_uri: str) -> dict:
-        """Get the content of a specific acceptance criteria resource.
+        """[Server] Return one acceptance-criteria resource by URI.
         
         Args:
             resource_uri: The URI of the resource (e.g., "resource://acceptance/vm-core")
@@ -183,11 +170,7 @@ def create_app() -> FastMCP:
     
     @app.tool()
     def list_prompts() -> dict:
-        """List all available prompt templates.
-        
-        Returns a list of available prompts and their descriptions.
-        These prompts guide AI assistants in performing complex validation workflows.
-        """
+        """[Server] List built-in prompt templates for orchestration workflows."""
         from .plugins.utils import ok
         
         return ok({
@@ -209,7 +192,7 @@ def create_app() -> FastMCP:
     
     @app.tool()
     def get_prompt(prompt_name: str) -> dict:
-        """Get the content of a specific prompt template.
+        """[Server] Return one prompt template by name.
         
         Args:
             prompt_name: The name of the prompt (e.g., "planner", "evaluator", "summarizer")

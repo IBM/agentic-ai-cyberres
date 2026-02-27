@@ -18,6 +18,12 @@ import os
 # Load environment variables from a .env file if present
 load_dotenv()
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
 
 class Settings(BaseModel):
     """Configuration values for the MCP server.
@@ -50,6 +56,9 @@ class Settings(BaseModel):
     port: int = int(os.getenv("MCP_PORT", "8000"))
     transport: str = os.getenv("MCP_TRANSPORT", "streamable-http")
     secrets_file: str = os.getenv("SECRETS_FILE", "secrets.json")
+    ssh_strict_host_key_checking: bool = _env_bool("SSH_STRICT_HOST_KEY_CHECKING", True)
+    ssh_trust_unknown_hosts: bool = _env_bool("SSH_TRUST_UNKNOWN_HOSTS", False)
+    ssh_known_hosts_file: str = os.getenv("SSH_KNOWN_HOSTS_FILE", "")
     oracle_home: str = os.getenv("ORACLE_HOME", "/u01/app/oracle/product/19c/dbhome_1")
     oracle_listener_ora: str = os.getenv("ORACLE_LISTENER_ORA", "{oracle_home}/network/admin/listener.ora").format(oracle_home=oracle_home)
     oracle_tnsnames_ora: str = os.getenv("ORACLE_TNSNAMES_ORA", "{oracle_home}/network/admin/tnsnames.ora").format(oracle_home=oracle_home)

@@ -25,9 +25,9 @@ def attach(mcp):
     """Register workload discovery tools onto the FastMCP instance."""
     
     try:
-        from ..utils import ok, err
+        from ..utils import ok, err, resolve_ssh_auth
     except Exception:
-        from plugins.utils import ok, err  # type: ignore
+        from plugins.utils import ok, err, resolve_ssh_auth  # type: ignore
     
     @mcp.tool()
     def discover_os_only(
@@ -35,10 +35,10 @@ def attach(mcp):
         ssh_user: Optional[str] = None,
         ssh_password: Optional[str] = None,
         ssh_key_path: Optional[str] = None,
+        credential_id: Optional[str] = None,
         ssh_port: int = 22
     ) -> Dict[str, Any]:
-        """
-        Perform OS detection only (fast, lightweight).
+        """[Discovery][SSH] Detect operating system and distribution details only.
         
         Quickly identifies operating system type, version, and distribution
         without performing application discovery.
@@ -61,6 +61,16 @@ def attach(mcp):
             ... )
         """
         try:
+            ssh_user, ssh_password, ssh_key_path, auth_err = resolve_ssh_auth(
+                ssh_user=ssh_user,
+                ssh_password=ssh_password,
+                ssh_key_path=ssh_key_path,
+                credential_id=credential_id,
+                logger=logger,
+            )
+            if auth_err:
+                return err(auth_err, code="INPUT_ERROR", host=host)
+
             from ...models import DiscoveryRequest
             from .os_detector import OSDetector
             
@@ -110,11 +120,11 @@ def attach(mcp):
         ssh_user: Optional[str] = None,
         ssh_password: Optional[str] = None,
         ssh_key_path: Optional[str] = None,
+        credential_id: Optional[str] = None,
         ssh_port: int = 22,
         min_confidence: str = "low"
     ) -> Dict[str, Any]:
-        """
-        Discover enterprise applications on a target server.
+        """[Discovery][SSH] Detect running applications with confidence scoring.
         
         Uses process scanning and port scanning to identify running applications
         such as databases, web servers, application servers, and more.
@@ -139,6 +149,16 @@ def attach(mcp):
             ... )
         """
         try:
+            ssh_user, ssh_password, ssh_key_path, auth_err = resolve_ssh_auth(
+                ssh_user=ssh_user,
+                ssh_password=ssh_password,
+                ssh_key_path=ssh_key_path,
+                credential_id=credential_id,
+                logger=logger,
+            )
+            if auth_err:
+                return err(auth_err, code="INPUT_ERROR", host=host)
+
             from ...models import DiscoveryRequest, ConfidenceLevel
             from .app_detector import ApplicationDetector
             
@@ -215,6 +235,7 @@ def attach(mcp):
         ssh_user: Optional[str] = None,
         ssh_password: Optional[str] = None,
         ssh_key_path: Optional[str] = None,
+        credential_id: Optional[str] = None,
         ssh_port: int = 22,
         collect_processes: bool = True,
         collect_ports: bool = True,
@@ -223,8 +244,7 @@ def attach(mcp):
         collect_packages: bool = False,
         collect_services: bool = False
     ) -> Dict[str, Any]:
-        """
-        Get raw server data for agent-side LLM processing.
+        """[Discovery][SSH] Collect raw host data for agent-side analysis.
         
         This tool collects raw data from the target server without performing
         signature-based detection. Use this when you need to:
@@ -262,6 +282,16 @@ def attach(mcp):
             ... )
         """
         try:
+            ssh_user, ssh_password, ssh_key_path, auth_err = resolve_ssh_auth(
+                ssh_user=ssh_user,
+                ssh_password=ssh_password,
+                ssh_key_path=ssh_key_path,
+                credential_id=credential_id,
+                logger=logger,
+            )
+            if auth_err:
+                return err(auth_err, code="INPUT_ERROR", host=host)
+
             from ...models import DiscoveryRequest
             from .raw_data_collector import RawDataCollector
             from ..ssh_utils import SSHExecutor
@@ -338,6 +368,7 @@ def attach(mcp):
         ssh_user: Optional[str] = None,
         ssh_password: Optional[str] = None,
         ssh_key_path: Optional[str] = None,
+        credential_id: Optional[str] = None,
         ssh_port: int = 22,
         detect_os: bool = True,
         detect_applications: bool = True,
@@ -347,8 +378,7 @@ def attach(mcp):
         timeout_seconds: int = 300,
         min_confidence: str = "low"
     ) -> Dict[str, Any]:
-        """
-        Perform comprehensive workload discovery on a target server.
+        """[Discovery][SSH] Entry point for full workload discovery workflow.
         
         This tool executes a multi-stage discovery process:
         1. OS Detection: Identifies operating system, version, and distribution
@@ -383,6 +413,16 @@ def attach(mcp):
             ... )
         """
         try:
+            ssh_user, ssh_password, ssh_key_path, auth_err = resolve_ssh_auth(
+                ssh_user=ssh_user,
+                ssh_password=ssh_password,
+                ssh_key_path=ssh_key_path,
+                credential_id=credential_id,
+                logger=logger,
+            )
+            if auth_err:
+                return err(auth_err, code="INPUT_ERROR", host=host)
+
             # Implementation will be completed in Sprint 4
             return ok({
                 "message": "Full workload discovery not yet implemented",

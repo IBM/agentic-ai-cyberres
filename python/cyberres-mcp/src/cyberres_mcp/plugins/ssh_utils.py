@@ -11,8 +11,43 @@ Copyright contributors to the agentic-ai-cyberres project
 from typing import Tuple, Callable, Optional
 import paramiko
 import logging
+import os
 
 logger = logging.getLogger("mcp.ssh_utils")
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _ssh_security_config() -> Tuple[bool, bool, Optional[str]]:
+    """
+    Return SSH host-key security settings.
+
+    Returns:
+        (strict_host_key_checking, trust_unknown_hosts, known_hosts_file)
+    """
+    strict = _env_bool("SSH_STRICT_HOST_KEY_CHECKING", True)
+    trust_unknown = _env_bool("SSH_TRUST_UNKNOWN_HOSTS", False)
+    known_hosts_file: Optional[str] = os.getenv("SSH_KNOWN_HOSTS_FILE")
+    try:
+        try:
+            from ..settings import SETTINGS
+        except Exception:
+            from cyberres_mcp.settings import SETTINGS  # type: ignore
+        strict = bool(getattr(SETTINGS, "ssh_strict_host_key_checking", strict))
+        trust_unknown = bool(getattr(SETTINGS, "ssh_trust_unknown_hosts", trust_unknown))
+        configured_known_hosts = getattr(SETTINGS, "ssh_known_hosts_file", "")
+        if configured_known_hosts:
+            known_hosts_file = configured_known_hosts
+    except Exception:
+        pass
+
+    if known_hosts_file:
+        known_hosts_file = known_hosts_file.strip() or None
+    return strict, trust_unknown, known_hosts_file
 
 
 class SSHExecutor:
@@ -91,7 +126,25 @@ class SSHExecutor:
             return  # Already connected
         
         self._client = paramiko.SSHClient()
-        self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        strict_host_key_checking, trust_unknown_hosts, known_hosts_file = _ssh_security_config()
+        self._client.load_system_host_keys()
+        if known_hosts_file:
+            try:
+                self._client.load_host_keys(known_hosts_file)
+            except Exception as ex:
+                logger.warning(f"Failed to load SSH known_hosts file '{known_hosts_file}': {ex}")
+        if trust_unknown_hosts:
+            logger.warning(
+                "SSH trust_unknown_hosts is enabled; unknown host keys will be accepted (TOFU)."
+            )
+            self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        elif strict_host_key_checking:
+            self._client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        else:
+            logger.warning(
+                "SSH strict host-key checking is disabled; unknown host keys may be accepted."
+            )
+            self._client.set_missing_host_key_policy(paramiko.WarningPolicy())
         
         connect_kwargs = {
             'hostname': self.host,
@@ -147,7 +200,7 @@ class SSHExecutor:
         logger.warning(f"Could not load key {key_path} with any known type")
         return None
     
-    def execute(self, command: str) -> Tuple[int, str, str]:
+    def execute(self, command: str, stdin_data: Optional[str] = None) -> Tuple[int, str, str]:
         """
         Execute command and return (exit_code, stdout, stderr).
         
@@ -163,15 +216,22 @@ class SSHExecutor:
         if self._client is None:
             self.connect()
         
-        # Truncate long commands in logs
-        log_cmd = command[:100] + "..." if len(command) > 100 else command
-        logger.debug(f"Executing on {self.host}: {log_cmd}")
+        logger.debug(
+            "Executing SSH command on %s (command_length=%d, stdin_length=%d)",
+            self.host,
+            len(command),
+            len(stdin_data) if stdin_data else 0,
+        )
         
         try:
             stdin, stdout, stderr = self._client.exec_command(
                 command,
                 timeout=self.timeout
             )
+            if stdin_data:
+                stdin.write(stdin_data)
+                stdin.flush()
+                stdin.channel.shutdown_write()
             
             out = stdout.read().decode('utf-8', errors='replace')
             err = stderr.read().decode('utf-8', errors='replace')
@@ -242,7 +302,8 @@ def ssh_exec(
     password: Optional[str] = None,
     key_path: Optional[str] = None,
     port: int = 22,
-    timeout: float = 30.0
+    timeout: float = 30.0,
+    stdin_data: Optional[str] = None,
 ) -> Tuple[int, str, str]:
     """
     Execute single SSH command (backward compatible with existing code).
@@ -269,7 +330,7 @@ def ssh_exec(
         ... )
     """
     with SSHExecutor(host, username, password, key_path, port, timeout) as executor:
-        return executor.execute(command)
+        return executor.execute(command, stdin_data=stdin_data)
 
 
 def create_ssh_executor(

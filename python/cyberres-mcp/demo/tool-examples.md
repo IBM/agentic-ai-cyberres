@@ -203,30 +203,30 @@ Backwards-compatible VM validation tool.
 
 ### db_oracle_connect
 
-Connect to Oracle database and retrieve basic instance information.
+Connect to Oracle database and retrieve basic instance information via SSH.
 
-**Example with DSN:**
+**Example:**
 ```json
 {
   "tool": "db_oracle_connect",
   "args": {
-    "dsn": "10.0.2.20/ORCLCDB",
-    "user": "system",
-    "password": "oracle123"
+    "ssh_host": "10.0.2.20",
+    "ssh_user": "oracle",
+    "ssh_password": "ssh-secret",
+    "sudo_oracle": false
   }
 }
 ```
 
-**Example with discrete parameters:**
+**Example using credential_id (no password in tool args):**
 ```json
 {
   "tool": "db_oracle_connect",
   "args": {
-    "host": "oracle-prod.example.com",
-    "port": 1521,
-    "service": "ORCLCDB",
-    "user": "system",
-    "password": "oracle123"
+    "ssh_host": "10.0.2.20",
+    "ssh_user": "oracle",
+    "credential_id": "oracle-ssh-prod",
+    "sudo_oracle": true
   }
 }
 ```
@@ -244,16 +244,30 @@ Connect to Oracle database and retrieve basic instance information.
 
 ### db_oracle_tablespaces
 
-Get tablespace usage information.
+Get tablespace usage information via SSH.
 
 **Example:**
 ```json
 {
   "tool": "db_oracle_tablespaces",
   "args": {
-    "dsn": "10.0.2.20/ORCLCDB",
-    "user": "system",
-    "password": "oracle123"
+    "ssh_host": "10.0.2.20",
+    "ssh_user": "oracle",
+    "ssh_password": "ssh-secret",
+    "sudo_oracle": false
+  }
+}
+```
+
+**Example using credential_id (no password in tool args):**
+```json
+{
+  "tool": "db_oracle_tablespaces",
+  "args": {
+    "ssh_host": "10.0.2.20",
+    "ssh_user": "oracle",
+    "credential_id": "oracle-ssh-prod",
+    "sudo_oracle": true
   }
 }
 ```
@@ -279,6 +293,51 @@ Get tablespace usage information.
       "free_mb": 2048.33
     }
   ]
+}
+```
+
+### db_oracle_data_validation
+
+Validate Oracle data integrity and post-recovery production readiness via SSH.
+
+**Example using credential_id (recommended):**
+```json
+{
+  "tool": "db_oracle_data_validation",
+  "args": {
+    "ssh_host": "10.0.2.20",
+    "ssh_user": "oracle",
+    "credential_id": "oracle-ssh-prod",
+    "sudo_oracle": true
+  }
+}
+```
+
+**Expected Response (shape):**
+```json
+{
+  "ok": true,
+  "production_ready": true,
+  "overall_status": "PASS_WITH_WARNINGS",
+  "summary": {
+    "total_checks": 12,
+    "passed": 10,
+    "warnings": 2,
+    "failed": 0
+  },
+  "checks": [
+    {
+      "name": "database_block_corruption",
+      "status": "PASS",
+      "observed": 0,
+      "expected": "0"
+    }
+  ],
+  "metrics": {
+    "corrupted_blocks": 0,
+    "recover_file_count": 0,
+    "critical_tablespace_count_95_pct": 0
+  }
 }
 ```
 
@@ -478,28 +537,28 @@ Discover comprehensive Oracle database configuration using direct connection (no
 
 ### db_mongo_connect
 
-Connect to MongoDB and verify connectivity.
+Connect to MongoDB and verify connectivity via SSH.
 
-**Example with URI:**
+**Example:**
 ```json
 {
   "tool": "db_mongo_connect",
   "args": {
-    "uri": "mongodb://admin:mongo123@10.0.2.30:27017/admin"
+    "ssh_host": "10.0.2.30",
+    "ssh_user": "mongodb",
+    "ssh_password": "mongo123"
   }
 }
 ```
 
-**Example with discrete parameters:**
+**Example using credential_id (no password in tool args):**
 ```json
 {
   "tool": "db_mongo_connect",
   "args": {
-    "host": "mongo-prod.example.com",
-    "port": 27017,
-    "user": "admin",
-    "password": "mongo123",
-    "database": "admin"
+    "ssh_host": "10.0.2.30",
+    "ssh_user": "mongodb",
+    "credential_id": "mongo-prod"
   }
 }
 ```
@@ -508,21 +567,27 @@ Connect to MongoDB and verify connectivity.
 ```json
 {
   "ok": true,
-  "ping": {"ok": 1.0},
-  "version": "6.0.5"
+  "ping": {"ok": 1},
+  "version": "6.0.5",
+  "connection": {
+    "via": "ssh_mongo_shell",
+    "mode": "ssh_local_noauth"
+  }
 }
 ```
 
 ### db_mongo_rs_status
 
-Get replica set status for a MongoDB cluster.
+Get replica set status via SSH.
 
 **Example:**
 ```json
 {
   "tool": "db_mongo_rs_status",
   "args": {
-    "uri": "mongodb://admin:mongo123@mongo-rs-01.example.com:27017,mongo-rs-02.example.com:27017/admin?replicaSet=rs0"
+    "ssh_host": "10.0.2.30",
+    "ssh_user": "mongodb",
+    "credential_id": "mongo-prod"
   }
 }
 ```
@@ -558,7 +623,7 @@ Get replica set status for a MongoDB cluster.
 
 ### db_mongo_ssh_ping
 
-SSH into server and run MongoDB ping command locally.
+Backward-compatible alias for SSH MongoDB connectivity check.
 
 **Example:**
 ```json
@@ -567,11 +632,7 @@ SSH into server and run MongoDB ping command locally.
   "args": {
     "ssh_host": "10.0.2.30",
     "ssh_user": "mongodb",
-    "ssh_password": "mongo123",
-    "port": 27017,
-    "mongo_user": "admin",
-    "mongo_password": "mongo123",
-    "auth_db": "admin"
+    "credential_id": "mongo-prod"
   }
 }
 ```
@@ -580,14 +641,16 @@ SSH into server and run MongoDB ping command locally.
 ```json
 {
   "ok": true,
-  "ping": {"ok": 1.0},
-  "via": "ssh_exec"
+  "ping": {"ok": 1},
+  "connection": {
+    "via": "ssh_mongo_shell"
+  }
 }
 ```
 
 ### db_mongo_ssh_rs_status
 
-SSH into server and get replica set status locally.
+Backward-compatible alias for SSH replica set status check.
 
 **Example:**
 ```json
@@ -596,10 +659,7 @@ SSH into server and get replica set status locally.
   "args": {
     "ssh_host": "10.0.2.30",
     "ssh_user": "mongodb",
-    "ssh_key_path": "/home/user/.ssh/id_rsa",
-    "port": 27017,
-    "mongo_user": "admin",
-    "mongo_password": "mongo123"
+    "credential_id": "mongo-prod"
   }
 }
 ```
@@ -615,10 +675,7 @@ Validate a MongoDB collection's integrity.
   "args": {
     "ssh_host": "10.0.2.30",
     "ssh_user": "mongodb",
-    "ssh_password": "mongo123",
-    "port": 27017,
-    "mongo_user": "admin",
-    "mongo_password": "mongo123",
+    "credential_id": "mongo-prod",
     "db_name": "production",
     "collection": "users",
     "full": true
@@ -630,7 +687,7 @@ Validate a MongoDB collection's integrity.
 ```json
 {
   "ok": true,
-  "via": "ssh_exec",
+  "via": "ssh_mongo_shell",
   "db": "production",
   "collection": "users",
   "full": true,
@@ -644,7 +701,74 @@ Validate a MongoDB collection's integrity.
 }
 ```
 
-## Server Health Tool
+## Workload Discovery Tools
+
+### discover_os_only
+
+Detect OS and distribution details only (fast path).
+
+```json
+{
+  "tool": "discover_os_only",
+  "args": {
+    "host": "10.0.1.5",
+    "ssh_user": "admin",
+    "credential_id": "vm-prod"
+  }
+}
+```
+
+### discover_applications
+
+Detect running applications with confidence scoring.
+
+```json
+{
+  "tool": "discover_applications",
+  "args": {
+    "host": "10.0.1.5",
+    "ssh_user": "admin",
+    "credential_id": "vm-prod",
+    "min_confidence": "medium"
+  }
+}
+```
+
+### get_raw_server_data
+
+Collect raw host data for agent-side correlation.
+
+```json
+{
+  "tool": "get_raw_server_data",
+  "args": {
+    "host": "10.0.1.5",
+    "ssh_user": "admin",
+    "credential_id": "vm-prod",
+    "collect_processes": true,
+    "collect_ports": true
+  }
+}
+```
+
+### discover_workload
+
+Entry point for full workload discovery workflow.
+
+```json
+{
+  "tool": "discover_workload",
+  "args": {
+    "host": "10.0.1.5",
+    "ssh_user": "admin",
+    "credential_id": "vm-prod",
+    "detect_os": true,
+    "detect_applications": true
+  }
+}
+```
+
+## Server Tools
 
 ### server_health
 
@@ -664,13 +788,61 @@ Check MCP server health and capabilities.
   "ok": true,
   "status": "healthy",
   "version": "0.1.0",
-  "plugins": ["network", "vm_linux", "oracle_db", "mongodb"],
+  "plugins": ["network", "vm_linux", "oracle_db", "mongodb", "workload_discovery"],
   "capabilities": {
-    "tools": 13,
+    "tools": 24,
     "resources": 3,
     "prompts": 3
   },
-  "description": "Recovery validation MCP server for infrastructure health checks"
+  "description": "Recovery validation MCP server for infrastructure health checks and workload discovery. Includes tools for OS detection and application discovery."
+}
+```
+
+### list_resources
+
+List available acceptance criteria resources.
+
+```json
+{
+  "tool": "list_resources",
+  "args": {}
+}
+```
+
+### get_resource
+
+Get one acceptance criteria resource by URI.
+
+```json
+{
+  "tool": "get_resource",
+  "args": {
+    "resource_uri": "resource://acceptance/db-oracle"
+  }
+}
+```
+
+### list_prompts
+
+List available orchestration prompts.
+
+```json
+{
+  "tool": "list_prompts",
+  "args": {}
+}
+```
+
+### get_prompt
+
+Get one orchestration prompt by name.
+
+```json
+{
+  "tool": "get_prompt",
+  "args": {
+    "prompt_name": "planner"
+  }
 }
 ```
 

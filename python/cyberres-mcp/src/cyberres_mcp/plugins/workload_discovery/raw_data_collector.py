@@ -6,6 +6,7 @@ Copyright contributors to the agentic-ai-cyberres project
 
 from typing import Dict, Any, List, Optional, Callable, Tuple
 import logging
+import shlex
 
 logger = logging.getLogger("mcp.workload_discovery.raw_data_collector")
 
@@ -140,7 +141,8 @@ class RawDataCollector:
         
         for path in paths:
             try:
-                exit_code, stdout, stderr = ssh_exec(f"cat {path} 2>/dev/null")
+                quoted_path = shlex.quote(path)
+                exit_code, stdout, stderr = ssh_exec(f"cat -- {quoted_path} 2>/dev/null")
                 if exit_code == 0 and stdout:
                     configs[path] = stdout
                     logger.debug(f"Collected config: {path} ({len(stdout)} bytes)")

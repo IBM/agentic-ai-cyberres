@@ -24,8 +24,8 @@ Model Context Protocol (MCP) is an open protocol that enables AI assistants (lik
 
 ### Key Features
 
-- ✅ **15 Specialized Tools** for VM, Oracle, and MongoDB validation
-- 🔒 **Flexible Security** - Supports both direct and SSH-based access
+- ✅ **24 Specialized Tools** across network, VM, Oracle, MongoDB, discovery, and server helper workflows
+- 🔒 **Flexible Security** - SSH-first validation with optional direct Oracle configuration discovery
 - 🌐 **Network-Aware** - Works in firewalled and restricted environments
 - 📊 **Comprehensive** - From connectivity checks to data integrity validation
 - 🤖 **AI-Ready** - Structured responses perfect for LLM consumption
@@ -36,8 +36,8 @@ Model Context Protocol (MCP) is an open protocol that enables AI assistants (lik
 | Type | Technologies | Access Methods |
 |------|-------------|----------------|
 | **Operating Systems** | Linux (systemd-based) | SSH (password/key) |
-| **Databases** | Oracle 11g-21c | Direct, SSH-based |
-| **NoSQL** | MongoDB 4.x-7.x | Direct, SSH-based |
+| **Databases** | Oracle 11g-21c | SSH-based, Direct (config discovery) |
+| **NoSQL** | MongoDB 4.x-7.x | SSH-based |
 | **Network** | TCP connectivity | Socket-based |
 
 ---
@@ -108,7 +108,7 @@ Claude will use `tcp_portcheck` to verify connectivity.
 └────────────────────────────────────────────────────────────┘
          │              │              │              │
          ▼              ▼              ▼              ▼
-    TCP Sockets    SSH/Paramiko   oracledb lib   pymongo lib
+    TCP Sockets    SSH/Paramiko   sqlplus/oracledb   mongosh via SSH
          │              │              │              │
          ▼              ▼              ▼              ▼
     [Network]      [Linux VMs]   [Oracle DBs]   [MongoDB]
@@ -130,13 +130,13 @@ def attach(mcp):
 ### Security Model
 
 1. **Credential Management**
-   - Secrets stored in `demo-secrets.json` (gitignored)
+   - Secrets stored in `secrets.json` (gitignored)
    - Sensitive data filtered from logs
    - No credentials in code
 
 2. **Access Patterns**
-   - Direct: Client → MCP → Database
-   - SSH-based: Client → MCP → SSH → Database (localhost)
+   - SSH-based: Client → MCP → SSH → Database command execution on target host
+   - Direct Oracle config mode: Client → MCP → Oracle DB (for `db_oracle_discover_config`)
 
 3. **Network Security**
    - Supports firewalled environments
@@ -183,6 +183,7 @@ def attach(mcp):
 - `username` (str): SSH username
 - `password` (str, optional): SSH password
 - `key_path` (str, optional): SSH private key path
+- `credential_id` (str, optional): Secret key in `secrets.json` for SSH creds
 
 **Returns:** Uptime, load averages, memory info
 
@@ -223,7 +224,9 @@ def attach(mcp):
 **Parameters:**
 - `vm_ip` (str): VM IP address
 - `ssh_user` (str): SSH username
-- `ssh_password` (str): SSH password
+- `ssh_password` (str, optional): SSH password
+- `ssh_key_path` (str, optional): SSH key path
+- `credential_id` (str, optional): Secret key in `secrets.json` for SSH creds
 
 **Use Cases:**
 - Backward compatibility
@@ -231,18 +234,18 @@ def attach(mcp):
 
 ---
 
-### Oracle Database Tools (4)
+### Oracle Database Tools (5)
 
 #### db_oracle_connect
-**Purpose:** Quick Oracle connectivity test
+**Purpose:** SSH-based Oracle connectivity test and instance metadata check
 
 **Parameters:**
-- `dsn` (str, optional): Oracle DSN
-- `host` (str, optional): Database host
-- `port` (int): Database port (default: 1521)
-- `service` (str, optional): Service name
-- `user` (str): Database username
-- `password` (str): Database password
+- `ssh_host` (str): SSH target host
+- `ssh_user` (str): SSH username
+- `ssh_password` (str, optional): SSH password
+- `ssh_key_path` (str, optional): SSH key path
+- `credential_id` (str, optional): Secret key in `secrets.json` for SSH creds
+- `sudo_oracle` (bool): Use sudo to oracle user
 
 **Returns:** Instance name, version, open mode, role
 
@@ -252,12 +255,18 @@ def attach(mcp):
 - Connection troubleshooting
 
 #### db_oracle_tablespaces
-**Purpose:** Get tablespace usage statistics
+**Purpose:** SSH-based tablespace usage and free-space reporting
 
 **Parameters:**
-- `dsn` (str): Oracle DSN
-- `user` (str): Database username
-- `password` (str): Database password
+- `ssh_host` (str): SSH target host
+- `ssh_user` (str): SSH username
+- `ssh_password` (str, optional): SSH password
+- `ssh_key_path` (str, optional): SSH key path
+- `credential_id` (str, optional): Secret key in `secrets.json` for SSH creds
+- `sudo_oracle` (bool): Use sudo to oracle user
+
+Tablespace query is executed through SSH OS-auth mode:
+`sqlplus -S '/ as sysdba'` on the remote host.
 
 **Returns:** List of tablespaces with usage percentages
 
@@ -265,6 +274,24 @@ def attach(mcp):
 - Capacity monitoring
 - Storage planning
 - Performance analysis
+
+#### db_oracle_data_validation
+**Purpose:** Post-recovery Oracle data-integrity and production-readiness validation
+
+**Parameters:**
+- `ssh_host` (str): SSH target host
+- `ssh_user` (str): SSH username
+- `ssh_password` (str, optional): SSH password
+- `ssh_key_path` (str, optional): SSH key path
+- `credential_id` (str, optional): Secret key in `secrets.json` for SSH creds
+- `sudo_oracle` (bool): Use sudo to oracle user
+
+**Returns:** `production_ready` verdict, check-level pass/warn/fail, and core corruption/recovery metrics
+
+**Use Cases:**
+- Recovery cutover go/no-go validation
+- Corruption detection
+- Readiness gating for production traffic
 
 #### db_oracle_discover_and_validate
 **Purpose:** SSH-based Oracle discovery and validation
@@ -276,6 +303,7 @@ def attach(mcp):
 - `ssh_key_path` (str, optional): SSH key path
 - `oracle_user` (str, optional): Oracle username
 - `oracle_password` (str, optional): Oracle password
+- `credential_id` (str, optional): Secret key in `secrets.json` for SSH/Oracle creds
 - `lsnrctl_path` (str): Path to lsnrctl (default: "lsnrctl")
 - `sudo_oracle` (bool): Use sudo to oracle user
 
@@ -287,12 +315,13 @@ def attach(mcp):
 - Security-restricted networks
 
 #### db_oracle_discover_config ⭐ NEW
-**Purpose:** Comprehensive Oracle configuration discovery
+**Purpose:** Direct Oracle configuration discovery using DB credentials
 
 **Parameters:**
 - `host` (str): Database host
-- `user` (str): Database username
-- `password` (str): Database password
+- `user` (str, optional): Database username
+- `password` (str, optional): Database password
+- `credential_id` (str, optional): Secret key in `secrets.json` for Oracle creds
 - `port` (int): Database port (default: 1521)
 - `service` (str, optional): Service name
 - `sid` (str, optional): SID
@@ -320,28 +349,31 @@ def attach(mcp):
 ### MongoDB Tools (5)
 
 #### db_mongo_connect
-**Purpose:** Basic MongoDB connectivity test
+**Purpose:** SSH-based MongoDB connectivity and version check
 
 **Parameters:**
-- `uri` (str, optional): MongoDB connection URI
-- `host` (str, optional): MongoDB host
-- `port` (int): MongoDB port (default: 27017)
-- `user` (str, optional): Username
-- `password` (str, optional): Password
-- `database` (str): Database name (default: "admin")
+- `ssh_host` (str): SSH target host
+- `ssh_user` (str): SSH username
+- `ssh_password` (str, optional): SSH password
+- `ssh_key_path` (str, optional): SSH key path
+- `credential_id` (str, optional): Secret key in `secrets.json` for SSH and optional Mongo creds
 
-**Returns:** Ping response, server version
+**Returns:** Ping response, server version, hello/isMaster data, and discovery metadata
 
 **Use Cases:**
 - Quick connectivity check
 - Version verification
-- Pre-validation
+- SSH-only validation paths
 
 #### db_mongo_rs_status
-**Purpose:** Get replica set status (direct connection)
+**Purpose:** SSH-based replica-set status check
 
 **Parameters:**
-- `uri` (str): MongoDB connection URI
+- `ssh_host` (str): SSH target host
+- `ssh_user` (str): SSH username
+- `ssh_password` (str, optional): SSH password
+- `ssh_key_path` (str, optional): SSH key path
+- `credential_id` (str, optional): Secret key in `secrets.json` for SSH and optional Mongo creds
 
 **Returns:** Replica set name, state, member details
 
@@ -351,18 +383,14 @@ def attach(mcp):
 - Replication status
 
 #### db_mongo_ssh_ping
-**Purpose:** MongoDB ping via SSH (localhost-only MongoDB)
+**Purpose:** Backward-compatible alias for `db_mongo_connect`
 
 **Parameters:**
 - `ssh_host` (str): SSH target
 - `ssh_user` (str): SSH username
 - `ssh_password` (str, optional): SSH password
 - `ssh_key_path` (str, optional): SSH key
-- `port` (int): MongoDB port
-- `mongo_user` (str, optional): MongoDB username
-- `mongo_password` (str, optional): MongoDB password
-- `auth_db` (str): Auth database (default: "admin")
-- `mongosh_path` (str): Path to mongosh
+- `credential_id` (str, optional): Secret key in `secrets.json` for SSH and optional Mongo creds
 
 **Returns:** Ping response
 
@@ -372,9 +400,9 @@ def attach(mcp):
 - Security-restricted access
 
 #### db_mongo_ssh_rs_status
-**Purpose:** Replica set status via SSH
+**Purpose:** Backward-compatible alias for `db_mongo_rs_status`
 
-**Parameters:** Same as db_mongo_ssh_ping
+**Parameters:** Same as `db_mongo_ssh_ping`
 
 **Returns:** Replica set status
 
@@ -383,10 +411,10 @@ def attach(mcp):
 - SSH-only access scenarios
 
 #### validate_collection
-**Purpose:** Validate MongoDB collection integrity
+**Purpose:** Validate MongoDB collection integrity over SSH
 
 **Parameters:**
-- Same as db_mongo_ssh_ping, plus:
+- Same as `db_mongo_ssh_ping`, plus:
 - `db_name` (str): Database name
 - `collection` (str): Collection name
 - `full` (bool): Full validation (default: true)
@@ -400,19 +428,66 @@ def attach(mcp):
 
 ---
 
-### Server Health (1)
+### Workload Discovery Tools (4)
+
+#### discover_os_only
+**Purpose:** Detect OS and distribution details only (fast path)
+
+**Parameters:**
+- `host` (str): Target host
+- `ssh_user` (str, optional): SSH username
+- `ssh_password` (str, optional): SSH password
+- `ssh_key_path` (str, optional): SSH key path
+- `credential_id` (str, optional): Secret key in `secrets.json`
+- `ssh_port` (int): SSH port (default: 22)
+
+#### discover_applications
+**Purpose:** Detect running applications with confidence scoring
+
+**Parameters:** Same SSH parameters as `discover_os_only`, plus:
+- `min_confidence` (str): `high|medium|low|uncertain`
+
+#### get_raw_server_data
+**Purpose:** Collect raw host/process/port/config data for agent-side analysis
+
+**Parameters:** Same SSH parameters as `discover_os_only`, plus collection toggles:
+- `collect_processes`, `collect_ports`, `collect_configs`, `collect_packages`, `collect_services`
+- `config_paths` (list, optional)
+
+#### discover_workload
+**Purpose:** Entry point for integrated workload discovery workflow
+
+**Parameters:** Same SSH parameters as `discover_os_only`, plus:
+- `detect_os`, `detect_applications`, `detect_containers`
+- `scan_ports`, `port_range`, `timeout_seconds`, `min_confidence`
+
+---
+
+### Server Tools (5)
 
 #### server_health
 **Purpose:** Check MCP server health
 
 **Parameters:** None
 
-**Returns:** Server status, version, capabilities
+**Returns:** Server status, version, plugin list, and capability counts
 
 **Use Cases:**
 - Server connectivity verification
 - Capability discovery
 - Health monitoring
+
+#### list_resources
+**Purpose:** List available acceptance criteria resources
+
+#### get_resource
+**Purpose:** Get one acceptance criteria resource by URI
+
+#### list_prompts
+**Purpose:** List built-in orchestration prompts
+
+#### get_prompt
+**Purpose:** Get one orchestration prompt by name
 
 ---
 
@@ -434,7 +509,8 @@ def attach(mcp):
 
 3. Oracle Validation
    ├─> db_oracle_discover_config: Full configuration check
-   └─> db_oracle_tablespaces: Verify storage capacity
+   ├─> db_oracle_tablespaces: Verify storage capacity
+   └─> db_oracle_data_validation: Production readiness and corruption checks
 
 4. MongoDB Validation
    ├─> db_mongo_rs_status: Verify cluster health
@@ -545,29 +621,40 @@ uv run cyberres-mcp --help
 
 ```bash
 # Copy example secrets file
-cp demo-secrets.json.example demo-secrets.json
+cp secrets.example.json secrets.json
 
 # Edit with your credentials
-vi demo-secrets.json
+vi secrets.json
 ```
 
-Example `demo-secrets.json`:
+Example `secrets.json`:
 ```json
 {
-  "vm_linux": {
-    "host": "10.0.1.5",
-    "username": "admin",
-    "password": "secret123"
+  "vm-prod": {
+    "ssh": {
+      "username": "admin",
+      "password": "secret123"
+    }
   },
-  "oracle": {
-    "host": "10.0.2.20",
-    "port": 1521,
-    "service": "ORCL",
-    "user": "system",
-    "password": "oracle123"
+  "oracle-ssh-prod": {
+    "ssh": {
+      "username": "root",
+      "password": "ssh-secret"
+    },
+    "oracle": {
+      "username": "system",
+      "password": "oracle123"
+    }
   },
-  "mongodb": {
-    "uri": "mongodb://admin:mongo123@10.0.2.30:27017/admin"
+  "mongo-prod": {
+    "ssh": {
+      "username": "mongodb",
+      "password": "ssh-secret"
+    },
+    "mongo": {
+      "username": "admin",
+      "password": "mongo123"
+    }
   }
 }
 ```
@@ -595,9 +682,9 @@ Expected response:
   "ok": true,
   "status": "healthy",
   "version": "0.1.0",
-  "plugins": ["network", "vm_linux", "oracle_db", "mongodb"],
+  "plugins": ["network", "vm_linux", "oracle_db", "mongodb", "workload_discovery"],
   "capabilities": {
-    "tools": 15,
+    "tools": 24,
     "resources": 3,
     "prompts": 3
   }
@@ -632,9 +719,11 @@ bash pre-demo-test.sh
 ```json
 {
   "tool": "tcp_portcheck",
-  "host": "10.0.1.5",
-  "ports": [22, 1521, 27017],
-  "timeout_s": 2.0
+  "args": {
+    "host": "10.0.1.5",
+    "ports": [22, 1521, 27017],
+    "timeout_s": 2.0
+  }
 }
 ```
 
@@ -642,9 +731,11 @@ bash pre-demo-test.sh
 ```json
 {
   "tool": "vm_linux_uptime_load_mem",
-  "host": "10.0.1.5",
-  "username": "admin",
-  "password": "secret123"
+  "args": {
+    "host": "10.0.1.5",
+    "username": "admin",
+    "credential_id": "vm-prod"
+  }
 }
 ```
 
@@ -652,10 +743,11 @@ bash pre-demo-test.sh
 ```json
 {
   "tool": "db_oracle_discover_config",
-  "host": "10.0.2.20",
-  "user": "system",
-  "password": "oracle123",
-  "service": "ORCL"
+  "args": {
+    "host": "10.0.2.20",
+    "service": "ORCL",
+    "credential_id": "oracle-ssh-prod"
+  }
 }
 ```
 
@@ -663,7 +755,11 @@ bash pre-demo-test.sh
 ```json
 {
   "tool": "db_mongo_rs_status",
-  "uri": "mongodb://admin:mongo123@10.0.2.30:27017/admin?replicaSet=rs0"
+  "args": {
+    "ssh_host": "10.0.2.30",
+    "ssh_user": "mongodb",
+    "credential_id": "mongo-prod"
+  }
 }
 ```
 
@@ -743,7 +839,7 @@ Enable detailed logging:
 
 ```bash
 # Set log level
-export MCP_LOG_LEVEL=DEBUG
+export LOG_LEVEL=DEBUG
 
 # Run server
 uv run cyberres-mcp
@@ -762,7 +858,7 @@ uv run cyberres-mcp
 ### Security
 
 1. **Never commit secrets**
-   - Use `demo-secrets.json` (gitignored)
+   - Use `secrets.json` (gitignored)
    - Rotate credentials regularly
    - Use SSH keys instead of passwords when possible
 
@@ -867,7 +963,7 @@ uv run cyberres-mcp
 
 ## Conclusion
 
-The Recovery Validation MCP Server provides a comprehensive, flexible, and production-ready solution for infrastructure validation. With 15 specialized tools, support for multiple access patterns, and AI-powered orchestration, it significantly reduces validation time while improving accuracy and consistency.
+The Recovery Validation MCP Server provides a comprehensive, flexible, and production-ready solution for infrastructure validation. With 24 specialized tools, support for multiple access patterns, and AI-powered orchestration, it significantly reduces validation time while improving accuracy and consistency.
 
 Whether you're validating disaster recovery, performing migrations, or monitoring production systems, this MCP server provides the tools you need to ensure your infrastructure is healthy and operational.
 

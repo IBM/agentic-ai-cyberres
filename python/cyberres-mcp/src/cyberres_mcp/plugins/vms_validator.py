@@ -61,13 +61,28 @@ def attach(mcp):
     """Register VM-related tools on the given FastMCP instance."""
     logger = logging.getLogger("mcp.vm")
     try:
-        from .utils import ok, err
+        from .utils import ok, err, resolve_ssh_auth
     except Exception:
-        from plugins.utils import ok, err  # type: ignore
+        from plugins.utils import ok, err, resolve_ssh_auth  # type: ignore
 
     @mcp.tool()
-    def vm_linux_uptime_load_mem(host: str, username: str, password: Optional[str] = None, key_path: Optional[str] = None) -> Dict[str, Any]:
-        """Return uptime, load averages, and memory information from a Linux host."""
+    def vm_linux_uptime_load_mem(
+        host: str,
+        username: str,
+        password: Optional[str] = None,
+        key_path: Optional[str] = None,
+        credential_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """[VM][SSH] Collect Linux uptime, load averages, and memory/swap metrics."""
+        username, password, key_path, auth_err = resolve_ssh_auth(
+            ssh_user=username,
+            ssh_password=password,
+            ssh_key_path=key_path,
+            credential_id=credential_id,
+            logger=logger,
+        )
+        if auth_err:
+            return err(auth_err, code="INPUT_ERROR")
         cmd = "uptime && cat /proc/meminfo | egrep 'MemTotal|MemFree|MemAvailable|SwapTotal|SwapFree'"
         rc, out, serr = _ssh_exec(host, username, password=password, key_path=key_path, cmd=cmd)
         if rc != 0:
@@ -75,8 +90,23 @@ def attach(mcp):
         return ok({"rc": rc, "stdout": out, "stderr": serr}) if rc == 0 else err("ssh exec failed", code="SSH_ERROR", rc=rc, stdout=out, stderr=serr)
 
     @mcp.tool()
-    def vm_linux_fs_usage(host: str, username: str, password: Optional[str] = None, key_path: Optional[str] = None) -> Dict[str, Any]:
-        """Return POSIX filesystem usage statistics."""
+    def vm_linux_fs_usage(
+        host: str,
+        username: str,
+        password: Optional[str] = None,
+        key_path: Optional[str] = None,
+        credential_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """[VM][SSH] Collect filesystem usage from ``df -P -k``."""
+        username, password, key_path, auth_err = resolve_ssh_auth(
+            ssh_user=username,
+            ssh_password=password,
+            ssh_key_path=key_path,
+            credential_id=credential_id,
+            logger=logger,
+        )
+        if auth_err:
+            return err(auth_err, code="INPUT_ERROR")
         rc, out, serr = _ssh_exec(host, username, password=password, key_path=key_path, cmd="df -P -k")
         parsed = _parse_df_posix(out) if rc == 0 else []
         if rc != 0:
@@ -84,8 +114,24 @@ def attach(mcp):
         return ok({"rc": rc, "filesystems": parsed, "stderr": serr}) if rc == 0 else err("ssh exec failed", code="SSH_ERROR", rc=rc, stderr=serr)
 
     @mcp.tool()
-    def vm_linux_services(host: str, username: str, password: Optional[str] = None, key_path: Optional[str] = None, required: Optional[List[str]] = None) -> Dict[str, Any]:
-        """List running systemd services and verify required ones are active."""
+    def vm_linux_services(
+        host: str,
+        username: str,
+        password: Optional[str] = None,
+        key_path: Optional[str] = None,
+        required: Optional[List[str]] = None,
+        credential_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """[VM][SSH] Check running systemd services and validate required services."""
+        username, password, key_path, auth_err = resolve_ssh_auth(
+            ssh_user=username,
+            ssh_password=password,
+            ssh_key_path=key_path,
+            credential_id=credential_id,
+            logger=logger,
+        )
+        if auth_err:
+            return err(auth_err, code="INPUT_ERROR")
         cmd = "systemctl list-units --type=service --state=running --no-legend --no-pager | awk '{print $1}'"
         rc, out, serr = _ssh_exec(host, username, password=password, key_path=key_path, cmd=cmd)
         running = [ln.strip() for ln in out.splitlines() if ln.strip()]
@@ -97,14 +143,30 @@ def attach(mcp):
         return ok(payload) if rc == 0 and not missing else err("service(s) missing or ssh error", code="SERVICE_CHECK_FAILED" if not rc else "SSH_ERROR", **payload)
 
     @mcp.tool()
-    def vm_validator(vm_ip: str, ssh_user: str, ssh_password: str) -> Dict[str, Any]:
-        """Backwards compatible wrapper replicating the original vm_validator.
+    def vm_validator(
+        vm_ip: str,
+        ssh_user: str,
+        ssh_password: Optional[str] = None,
+        ssh_key_path: Optional[str] = None,
+        credential_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """[VM][SSH][Legacy] Run legacy VM readiness checks (root disk and sshd).
 
         This tool remains for compatibility with existing clients. It performs
         a root filesystem ``df`` check and verifies that ``sshd`` is active.
         """
-        disk_rc, disk_out, disk_err = _ssh_exec(vm_ip, ssh_user, password=ssh_password, cmd="df -h /")
-        svc_rc, svc_out, svc_err = _ssh_exec(vm_ip, ssh_user, password=ssh_password, cmd="systemctl is-active sshd || true")
+        ssh_user, ssh_password, ssh_key_path, auth_err = resolve_ssh_auth(
+            ssh_user=ssh_user,
+            ssh_password=ssh_password,
+            ssh_key_path=ssh_key_path,
+            credential_id=credential_id,
+            logger=logger,
+        )
+        if auth_err:
+            return err(auth_err, code="INPUT_ERROR")
+
+        disk_rc, disk_out, disk_err = _ssh_exec(vm_ip, ssh_user, password=ssh_password, key_path=ssh_key_path, cmd="df -h /")
+        svc_rc, svc_out, svc_err = _ssh_exec(vm_ip, ssh_user, password=ssh_password, key_path=ssh_key_path, cmd="systemctl is-active sshd || true")
         status = "PASS" if disk_rc == 0 and "active" in svc_out else "FAIL"
         return ok({
             "validation_status": status,
@@ -114,4 +176,3 @@ def attach(mcp):
             ],
             "details": {"vm_ip": vm_ip},
         }) if status == "PASS" else err("vm validation failed", code="VM_VALIDATE_FAILED", validation_status=status, details={"vm_ip": vm_ip})
-

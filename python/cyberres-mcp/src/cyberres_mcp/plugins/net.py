@@ -27,7 +27,7 @@ def attach(mcp):
 
     @mcp.tool()
     def tcp_portcheck(host: str, ports: List[int], timeout_s: float = 1.0) -> Dict[str, Any]:
-        """Selective TCP connectivity check.
+        """[Network][TCP] Check host/port reachability and latency.
 
         Attempts to connect to each port in ``ports`` on the specified
         ``host``. Reports the latency of each connection attempt and
