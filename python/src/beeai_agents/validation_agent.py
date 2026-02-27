@@ -1,29 +1,26 @@
 """
-BeeAI-based Validation Agent for Creating Validation Plans
+BeeAI Validation Agent — Deterministic Validation Planning
 
-This module provides a BeeAI RequirementAgent implementation for creating
-intelligent validation plans based on resource classification. It replaces
-the Pydantic AI implementation with BeeAI's declarative agent architecture.
+Creates validation plans by mapping resource category + discovered applications
+to exact MCP tool names and pre-populated tool_args (including SSH credentials).
 
-Key Features:
-- Intelligent validation planning using LLM reasoning
-- Category-specific validation strategies
-- Priority-based check ordering
-- MCP tool selection and configuration
-- Fallback plans for robustness
-- Comprehensive error handling
+Key design decisions:
+- **No LLM in the planning path** — LLMs proved unreliable at (a) picking valid
+  tool names and (b) injecting SSH credentials into every tool_args dict.
+  Deterministic mapping eliminates both failure modes.
+- **Credentials from resource object** — SSH username/password are resolved from
+  secrets.json before planning starts and injected directly into tool_args.
+- **Category-specific checks** — DATABASE_SERVER → Oracle/MongoDB checks + VM
+  health; WEB_SERVER → HTTP port + VM health; generic → VM health.
+- **API-compatible** — ``create_plan()`` still accepts ``available_tools`` for
+  logging; the ``llm_model`` / ``memory_size`` / ``temperature`` constructor
+  args are kept for backward compatibility.
 """
 
 import logging
 from typing import Optional, List
-from datetime import datetime
 
 from pydantic import BaseModel, Field
-
-# BeeAI imports
-from beeai_framework.agents.requirement.agent import RequirementAgent
-from beeai_framework.backend.chat import ChatModel
-from beeai_framework.memory import SlidingMemory, SlidingMemoryConfig
 
 # Local imports
 from models import (
@@ -105,46 +102,6 @@ class BeeAIValidationAgent:
         >>> priority_checks = plan.get_priority_checks(max_priority=2)
     """
     
-    SYSTEM_PROMPT = """You are a validation planning expert specializing in infrastructure validation.
-
-Your role is to:
-1. Analyze resource classification and discovered applications
-2. Create comprehensive validation plans with appropriate checks
-3. Prioritize checks based on criticality and resource type
-4. Select the right MCP tools for each validation
-5. Provide clear reasoning for your decisions
-
-Available MCP Tool Categories:
-- **Network Tools**: tcp_portcheck
-- **VM Tools**: vm_linux_uptime_load_mem, vm_linux_fs_usage, vm_linux_services
-- **Oracle DB Tools**: db_oracle_connect, db_oracle_tablespaces, db_oracle_discover_and_validate
-- **MongoDB Tools**: db_mongo_connect, db_mongo_rs_status, db_mongo_ssh_ping, validate_collection
-- **Workload Discovery**: discover_workload, discover_applications, discover_os_only
-
-Validation Plan Guidelines:
-- **Comprehensive**: Cover all critical aspects of the resource
-- **Prioritized**: Most important checks first (priority 1-2 are critical)
-- **Efficient**: Avoid redundant checks, optimize execution order
-- **Actionable**: Clear expected results and failure impacts
-- **Realistic**: Accurate time estimates (typically 5-10s per check)
-
-Priority Levels:
-- Priority 1: Critical checks (connectivity, core functionality)
-- Priority 2: Important checks (performance, configuration)
-- Priority 3: Standard checks (monitoring, logging)
-- Priority 4-5: Optional checks (nice-to-have validations)
-"""
-    
-    PLANNING_INSTRUCTIONS = [
-        "Analyze the resource type and classification carefully",
-        "Consider discovered applications and their requirements",
-        "Select appropriate MCP tools for each validation check",
-        "Prioritize critical checks (connectivity, core functionality)",
-        "Provide detailed reasoning for your validation strategy",
-        "Ensure tool arguments match the resource configuration",
-        "Estimate realistic execution times for each check"
-    ]
-    
     def __init__(
         self,
         llm_model: str = "ollama:llama3.2",
@@ -152,74 +109,55 @@ Priority Levels:
         temperature: float = 0.1
     ):
         """Initialize BeeAI Validation Agent.
-        
+
+        Note: ``llm_model``, ``memory_size``, and ``temperature`` are accepted
+        for API compatibility but are not used — planning is fully deterministic
+        and does not involve an LLM.
+
         Args:
-            llm_model: LLM model identifier (e.g., "ollama:llama3.2", "openai:gpt-4")
-            memory_size: Size of sliding memory window
-            temperature: LLM temperature for planning (0.0-1.0)
+            llm_model: LLM model identifier (kept for API compatibility)
+            memory_size: Memory window size (kept for API compatibility)
+            temperature: LLM temperature (kept for API compatibility)
         """
         self.llm_model = llm_model
         self.memory_size = memory_size
         self.temperature = temperature
-        
-        # Planning agent will be created on first use
-        self._planning_agent = None
-        
-        logger.info(
-            f"BeeAI Validation Agent initialized with model: {llm_model}"
-        )
-    
-    def _create_planning_agent(self) -> RequirementAgent:
-        """Create planning agent for validation plan generation.
-        
-        Returns:
-            Configured RequirementAgent for planning
-        """
-        if self._planning_agent is not None:
-            return self._planning_agent
-        
-        logger.info("Creating validation planning agent...")
-        
-        # Create LLM
-        llm = ChatModel.from_name(self.llm_model)
-        
-        # Create memory
-        memory = SlidingMemory(SlidingMemoryConfig(size=self.memory_size))
-        
-        # Create planning agent
-        self._planning_agent = RequirementAgent(
-            llm=llm,
-            memory=memory,
-            tools=[],  # Planning doesn't need tools
-            name="Validation Planning Agent",
-            description="Creates comprehensive validation plans using intelligent reasoning",
-            role="Infrastructure Validation Planner",
-            instructions=self.PLANNING_INSTRUCTIONS,
-            notes=[
-                "Always provide detailed step-by-step reasoning",
-                "Consider resource category and discovered applications",
-                "Prioritize critical checks appropriately",
-                "Select MCP tools that match the resource type"
-            ],
-        )
-        
-        logger.info("Validation planning agent created")
-        return self._planning_agent
+
+        logger.info("BeeAI Validation Agent initialized (deterministic planner)")
     
     async def create_plan(
         self,
         resource: ResourceInfo,
-        classification: ResourceClassification
+        classification: ResourceClassification,
+        available_tools: Optional[List] = None,
     ) -> ValidationPlan:
         """Create validation plan based on resource classification.
-        
+
+        Strategy: **Deterministic planning only**.
+
+        The LLM was previously used to generate plans, but it proved unreliable
+        at two things simultaneously:
+          1. Picking valid tool names (hallucination)
+          2. Injecting SSH credentials into every tool_args dict
+
+        The deterministic planner solves both problems definitively:
+          - Tool names are hard-coded from the known MCP server catalog
+          - Credentials are injected directly from the ``resource`` object
+            (which already holds the resolved SSH username/password from
+            secrets.json) — no LLM involvement needed
+
+        The ``available_tools`` parameter is accepted for API compatibility and
+        is used only to log which tools are available on the server.
+
         Args:
-            resource: Resource information
+            resource: Resource information (contains resolved SSH credentials)
             classification: Resource classification from discovery
-        
+            available_tools: Real MCPTool objects from the MCP server (used for
+                logging only; planning is deterministic)
+
         Returns:
             ValidationPlan with checks and strategy
-        
+
         Raises:
             Exception: If plan creation fails
         """
@@ -227,129 +165,40 @@ Priority Levels:
             f"Creating validation plan for {resource.host} "
             f"(category: {classification.category.value})"
         )
-        
-        # Build planning prompt
-        prompt = self._build_planning_prompt(resource, classification)
-        
-        try:
-            # Use BeeAI agent for planning
-            planning_agent = self._create_planning_agent()
-            
-            result = await planning_agent.run(
-                prompt,
-                expected_output=ValidationPlan
+
+        if available_tools:
+            tool_names = [
+                getattr(t, "name", str(t)) for t in available_tools
+            ]
+            logger.debug(
+                f"[Planner] MCP server has {len(available_tools)} tools: "
+                f"{tool_names}"
             )
-            
-            if result.output_structured:
-                plan = result.output_structured
-                logger.info(
-                    f"Validation plan created: {len(plan.checks)} checks, "
-                    f"estimated {plan.estimated_duration_seconds}s"
-                )
-                return plan
-            else:
-                logger.warning("No structured output, using fallback plan")
-                return self._create_fallback_plan(resource, classification)
-        
-        except Exception as e:
-            logger.warning(f"Failed to create AI plan: {e}, using fallback")
-            return self._create_fallback_plan(resource, classification)
+
+        # ── Deterministic planning (sole planner) ─────────────────────────────
+        # Credentials are injected directly from the resource object — no LLM.
+        logger.info("[Planner] Using deterministic validation plan")
+        return self._create_deterministic_plan(resource, classification)
     
-    def _build_planning_prompt(
-        self,
-        resource: ResourceInfo,
-        classification: ResourceClassification
-    ) -> str:
-        """Build prompt for validation planning.
-        
-        Args:
-            resource: Resource information
-            classification: Resource classification
-        
-        Returns:
-            Formatted prompt string
-        """
-        prompt_parts = [
-            "# Validation Planning Task",
-            "",
-            "## Resource Information",
-            f"- **Host**: {resource.host}",
-            f"- **Type**: {resource.resource_type.value}",
-            f"- **Category**: {classification.category.value}",
-            f"- **Classification Confidence**: {classification.confidence:.2f}",
-        ]
-        
-        # Add application information
-        if classification.primary_application:
-            prompt_parts.append(
-                f"- **Primary Application**: {classification.primary_application.name} "
-                f"(confidence: {classification.primary_application.confidence:.2f})"
-            )
-        
-        if classification.secondary_applications:
-            apps = ", ".join(app.name for app in classification.secondary_applications)
-            prompt_parts.append(f"- **Secondary Applications**: {apps}")
-        
-        if classification.recommended_validations:
-            prompt_parts.append(
-                f"- **Recommended Validations**: {', '.join(classification.recommended_validations)}"
-            )
-        
-        # Add resource-specific context
-        prompt_parts.append("")
-        prompt_parts.append("## Resource-Specific Details")
-        
-        if isinstance(resource, VMResourceInfo):
-            prompt_parts.append(f"- SSH User: {resource.ssh_user}")
-            prompt_parts.append(f"- SSH Port: {resource.ssh_port}")
-            if resource.required_services:
-                prompt_parts.append(
-                    f"- Required Services: {', '.join(resource.required_services)}"
-                )
-        elif isinstance(resource, OracleDBResourceInfo):
-            prompt_parts.append(f"- Database User: {resource.db_user}")
-            prompt_parts.append(f"- Port: {resource.port}")
-            if resource.service_name:
-                prompt_parts.append(f"- Service Name: {resource.service_name}")
-        elif isinstance(resource, MongoDBResourceInfo):
-            prompt_parts.append(f"- Port: {resource.port}")
-            if resource.database_name:
-                prompt_parts.append(f"- Database: {resource.database_name}")
-            if resource.validate_replica_set:
-                prompt_parts.append("- Validate Replica Set: Yes")
-        
-        # Add planning requirements
-        prompt_parts.extend([
-            "",
-            "## Your Task",
-            "Create a comprehensive validation plan that:",
-            "1. Includes appropriate checks for this resource category",
-            "2. Uses the correct MCP tools with proper arguments",
-            "3. Prioritizes critical checks (priority 1-2 for essential validations)",
-            "4. Provides clear expected results and failure impacts",
-            "5. Estimates realistic execution time (typically 5-10s per check)",
-            "6. Includes step-by-step reasoning for your decisions",
-            "",
-            "Respond with a complete ValidationPlan including all checks and reasoning."
-        ])
-        
-        return "\n".join(prompt_parts)
-    
-    def _create_fallback_plan(
+    def _create_deterministic_plan(
         self,
         resource: ResourceInfo,
         classification: ResourceClassification
     ) -> ValidationPlan:
-        """Create fallback validation plan when AI fails.
-        
+        """Create a deterministic, rule-based validation plan.
+
+        This is the primary planner.  It maps resource category and discovered
+        applications to the exact MCP tool names exposed by the server, so every
+        generated check is guaranteed to be executable.
+
         Args:
-            resource: Resource information
-            classification: Resource classification
-        
+            resource: Resource information (contains resolved SSH credentials)
+            classification: Resource classification from discovery
+
         Returns:
-            ValidationPlan with basic checks
+            ValidationPlan with correct MCP tool names and arguments
         """
-        logger.info("Creating fallback validation plan")
+        logger.info("Creating deterministic validation plan")
         
         checks = []
         
@@ -377,12 +226,24 @@ Priority Levels:
             checks.extend(self._get_generic_checks(resource))
         
         return ValidationPlan(
-            strategy_name=f"{classification.category.value}_fallback",
+            strategy_name=f"{classification.category.value}_deterministic",
             resource_category=classification.category,
             checks=checks,
             estimated_duration_seconds=len(checks) * 5,
-            reasoning="Fallback plan with basic validation checks for reliability"
+            reasoning=(
+                "Deterministic plan: checks are mapped directly from resource "
+                "category and discovered applications to known MCP tool names."
+            )
         )
+
+    # Keep old name as alias so any external callers still work
+    def _create_fallback_plan(
+        self,
+        resource: ResourceInfo,
+        classification: ResourceClassification
+    ) -> ValidationPlan:
+        """Alias for _create_deterministic_plan (backward compatibility)."""
+        return self._create_deterministic_plan(resource, classification)
     
     def _get_database_checks(
         self,
@@ -400,75 +261,327 @@ Priority Levels:
         """
         checks = []
         
-        if isinstance(resource, OracleDBResourceInfo):
-            checks.append(ValidationCheck(
-                check_id="db_oracle_001",
-                check_name="Oracle Database Connection",
-                check_type="database",
-                priority=1,
-                description="Verify Oracle database connectivity and basic info",
-                mcp_tool="db_oracle_connect",
-                tool_args={
-                    "host": resource.host,
-                    "port": resource.port,
-                    "service": resource.service_name,
-                    "user": resource.db_user,
-                    "password": resource.db_password
-                },
-                expected_result="Successfully connected to Oracle database",
-                failure_impact="Database is not accessible - critical failure"
-            ))
-            
-            checks.append(ValidationCheck(
-                check_id="db_oracle_002",
-                check_name="Tablespace Usage",
-                check_type="database",
-                priority=2,
-                description="Check Oracle tablespace usage and capacity",
-                mcp_tool="db_oracle_tablespaces",
-                tool_args={
-                    "dsn": resource.dsn or f"{resource.host}:{resource.port}/{resource.service_name}",
-                    "user": resource.db_user,
-                    "password": resource.db_password
-                },
-                expected_result="All tablespaces below 85% usage",
-                failure_impact="Database may run out of space"
-            ))
+        # Check if Oracle is detected (either as OracleDBResourceInfo or discovered on VM)
+        is_oracle = isinstance(resource, OracleDBResourceInfo)
+        if not is_oracle and classification.primary_application:
+            app_name = classification.primary_application.name.lower()
+            is_oracle = "oracle" in app_name
         
-        elif isinstance(resource, MongoDBResourceInfo):
-            checks.append(ValidationCheck(
-                check_id="db_mongo_001",
-                check_name="MongoDB Connection",
-                check_type="database",
-                priority=1,
-                description="Verify MongoDB connectivity and version",
-                mcp_tool="db_mongo_connect",
-                tool_args={
-                    "host": resource.host,
-                    "port": resource.port,
-                    "user": resource.mongo_user,
-                    "password": resource.mongo_password,
-                    "database": resource.auth_db
-                },
-                expected_result="Successfully connected to MongoDB",
-                failure_impact="Database is not accessible - critical failure"
-            ))
+        if is_oracle:
+            logger.info(f"Creating Oracle validation checks for {resource.host}")
             
-            if resource.validate_replica_set:
+            # Extract port from discovery or use default
+            port = 1521
+            service_name = "orcl"
+            
+            if isinstance(resource, OracleDBResourceInfo):
+                port = resource.port
+                service_name = resource.service_name or "orcl"
+            elif classification.primary_application and hasattr(classification.primary_application, 'network_bindings'):
+                # Extract port from discovered application
+                bindings = classification.primary_application.network_bindings
+                if bindings and len(bindings) > 0:
+                    port = bindings[0].port
+                    logger.info(f"Using discovered Oracle port: {port}")
+            
+            # Get credentials from resource
+            db_user = "system"
+            db_password = "oracle"
+            
+            if isinstance(resource, OracleDBResourceInfo):
+                db_user = resource.db_user
+                db_password = resource.db_password
+            elif isinstance(resource, VMResourceInfo):
+                # For VM resources, we might not have DB credentials
+                # Use SSH to discover or use defaults
+                logger.warning(f"Using default Oracle credentials for VM resource {resource.host}")
+            
+            # Get SSH credentials for all Oracle checks
+            ssh_user = None
+            ssh_password = None
+            
+            if isinstance(resource, VMResourceInfo):
+                ssh_user = resource.ssh_user
+                ssh_password = resource.ssh_password
+            
+            # Check 1: Oracle connectivity via SSH
+            # ONLY send SSH parameters - MCP tools have extra='forbid'
+            if ssh_user:
                 checks.append(ValidationCheck(
-                    check_id="db_mongo_002",
-                    check_name="Replica Set Status",
+                    check_id="db_oracle_001",
+                    check_name="Oracle Database Connection",
+                    check_type="database",
+                    priority=1,
+                    description="Verify Oracle database connectivity via SSH",
+                    mcp_tool="db_oracle_connect",
+                    tool_args={
+                        "ssh_host": resource.host,
+                        "ssh_user": ssh_user,
+                        "ssh_password": ssh_password,
+                        "sudo_oracle": False
+                    },
+                    expected_result="Successfully connected to Oracle database",
+                    failure_impact="Database is not accessible - critical failure"
+                ))
+            
+            # Check 2: Tablespace usage via SSH
+            # ONLY send SSH parameters - MCP tools have extra='forbid'
+            if ssh_user:
+                checks.append(ValidationCheck(
+                    check_id="db_oracle_002",
+                    check_name="Tablespace Usage",
                     check_type="database",
                     priority=2,
-                    description="Check MongoDB replica set health and member status",
-                    mcp_tool="db_mongo_rs_status",
+                    description="Check Oracle tablespace usage via SSH",
+                    mcp_tool="db_oracle_tablespaces",
                     tool_args={
-                        "uri": resource.uri or f"mongodb://{resource.host}:{resource.port}"
+                        "ssh_host": resource.host,
+                        "ssh_user": ssh_user,
+                        "ssh_password": ssh_password,
+                        "sudo_oracle": True  # Set to True for tablespace query
                     },
-                    expected_result="All replica set members are healthy and in sync",
-                    failure_impact="Replica set may have synchronization issues"
+                    expected_result="All tablespaces below 85% usage",
+                    failure_impact="Database may run out of space"
                 ))
+            
+            # Check 3: Oracle data integrity validation via SSH
+            # db_oracle_data_validation checks: open_mode, database_role, log_mode,
+            # corrupted blocks, offline datafiles, invalid objects, tablespace usage,
+            # backup age, archive dest errors — comprehensive post-recovery readiness.
+            if ssh_user:
+                checks.append(ValidationCheck(
+                    check_id="db_oracle_003",
+                    check_name="Oracle Data Integrity Validation",
+                    check_type="database",
+                    priority=2,
+                    description=(
+                        "SSH into the VM and run comprehensive Oracle data integrity checks: "
+                        "open_mode, database_role, corrupted blocks, offline datafiles, "
+                        "invalid objects, tablespace usage, backup age, archive dest errors."
+                    ),
+                    mcp_tool="db_oracle_data_validation",
+                    tool_args={
+                        "ssh_host": resource.host,
+                        "ssh_user": ssh_user,
+                        "ssh_password": ssh_password,
+                        "ssh_key_path": resource.ssh_key_path if isinstance(resource, VMResourceInfo) else None,
+                        "sudo_oracle": True,
+                    },
+                    expected_result=(
+                        "Database is READ WRITE, PRIMARY role, no corrupted blocks, "
+                        "no offline datafiles, no invalid objects, tablespaces < 95% full"
+                    ),
+                    failure_impact="Data integrity issues detected — database may not be production-ready"
+                ))
+
+            # Check 4: Oracle discovery and validation via SSH
+            if ssh_user:
+                checks.append(ValidationCheck(
+                    check_id="db_oracle_004",
+                    check_name="Oracle Discovery and Validation",
+                    check_type="database",
+                    priority=3,
+                    description="Discover Oracle via SSH and validate configuration",
+                    mcp_tool="db_oracle_discover_and_validate",
+                    tool_args={
+                        "ssh_host": resource.host,
+                        "ssh_user": ssh_user,
+                        "ssh_password": ssh_password,
+                        "oracle_user": db_user,
+                        "oracle_password": db_password,
+                        "sudo_oracle": False,
+                    },
+                    expected_result="Oracle discovered and validated successfully",
+                    failure_impact="Cannot discover Oracle configuration via SSH"
+                ))
+
+            logger.info(f"Created {len(checks)} Oracle validation checks")
         
+        # Check if MongoDB is detected
+        is_mongo = isinstance(resource, MongoDBResourceInfo)
+        if not is_mongo and classification.primary_application:
+            app_name = classification.primary_application.name.lower()
+            is_mongo = "mongo" in app_name
+        
+        if is_mongo:
+            logger.info(f"Creating MongoDB validation checks for {resource.host}")
+            
+            # Extract port from discovery or use default
+            port = 27017
+            if isinstance(resource, MongoDBResourceInfo):
+                port = resource.port
+            elif classification.primary_application and hasattr(classification.primary_application, 'network_bindings'):
+                bindings = classification.primary_application.network_bindings
+                if bindings and len(bindings) > 0:
+                    port = bindings[0].port
+                    logger.info(f"Using discovered MongoDB port: {port}")
+        
+            # Get MongoDB credentials
+            mongo_user = None
+            mongo_password = None
+            auth_db = "admin"
+            validate_replica_set = False
+
+            if isinstance(resource, MongoDBResourceInfo):
+                mongo_user = resource.mongo_user
+                mongo_password = resource.mongo_password
+                auth_db = resource.auth_db
+                validate_replica_set = resource.validate_replica_set
+            elif isinstance(resource, VMResourceInfo):
+                logger.info(
+                    f"MongoDB on VM {resource.host}: will use SSH tunnel via "
+                    "db_mongo_ssh_ping (MongoDB typically listens on 127.0.0.1 only)"
+                )
+
+            # ── Choose the right tool based on resource type ──────────────────
+            # For a VMResourceInfo: MongoDB listens on 127.0.0.1 of the remote
+            # host, so we SSH in and run mongosh locally (db_mongo_ssh_ping).
+            # For a MongoDBResourceInfo: the caller has already confirmed the
+            # MongoDB port is reachable from the agent, so use db_mongo_connect.
+            if isinstance(resource, VMResourceInfo):
+                ssh_user = resource.ssh_user
+                ssh_password = resource.ssh_password
+                ssh_key_path = resource.ssh_key_path
+
+                # Check 1: MongoDB ping via SSH
+                # MCP tool signature: db_mongo_ssh_ping(ssh_host, ssh_user,
+                #   ssh_password, ssh_key_path, credential_id)
+                # The MCP server resolves mongo auth internally via credential_id
+                # or falls back to unauthenticated local access.
+                # Extra params (port, mongo_user, mongo_password, auth_db) are
+                # NOT accepted — the tool uses extra='forbid'.
+                checks.append(ValidationCheck(
+                    check_id="db_mongo_001",
+                    check_name="MongoDB SSH Ping",
+                    check_type="database",
+                    priority=1,
+                    description=(
+                        "SSH into the VM and run db.adminCommand({ping:1}) via mongosh. "
+                        "Works even when MongoDB listens only on 127.0.0.1."
+                    ),
+                    mcp_tool="db_mongo_ssh_ping",
+                    tool_args={
+                        "ssh_host": resource.host,
+                        "ssh_user": ssh_user,
+                        "ssh_password": ssh_password,
+                        "ssh_key_path": ssh_key_path,
+                    },
+                    expected_result="MongoDB ping returns {ok: 1}",
+                    failure_impact="MongoDB is not running or not reachable via SSH"
+                ))
+
+                # Check 2: Replica set status via SSH
+                # Same parameter contract as db_mongo_ssh_ping.
+                checks.append(ValidationCheck(
+                    check_id="db_mongo_002",
+                    check_name="MongoDB Replica Set Status (SSH)",
+                    check_type="database",
+                    priority=2,
+                    description="SSH into the VM and run rs.status() via mongosh.",
+                    mcp_tool="db_mongo_ssh_rs_status",
+                    tool_args={
+                        "ssh_host": resource.host,
+                        "ssh_user": ssh_user,
+                        "ssh_password": ssh_password,
+                        "ssh_key_path": ssh_key_path,
+                    },
+                    expected_result="Replica set status returned (or standalone acknowledged)",
+                    failure_impact="Cannot determine replica set health"
+                ))
+
+                # Check 3: Collection integrity validation via SSH
+                # MCP tool: validate_collection(ssh_host, ssh_user, ssh_password,
+                #   ssh_key_path, credential_id, db_name, collection, full)
+                # collection="" → auto-discover all collections in the db and
+                # validate each one.  This works on both standalone and replica-set
+                # MongoDB without needing to know collection names in advance.
+                checks.append(ValidationCheck(
+                    check_id="db_mongo_003",
+                    check_name="MongoDB Collection Integrity",
+                    check_type="database",
+                    priority=3,
+                    description=(
+                        "SSH into the VM and run validate() on all collections in "
+                        "the admin database. Verifies MongoDB storage engine integrity."
+                    ),
+                    mcp_tool="validate_collection",
+                    tool_args={
+                        "ssh_host": resource.host,
+                        "ssh_user": ssh_user,
+                        "ssh_password": ssh_password,
+                        "ssh_key_path": ssh_key_path,
+                        "db_name": "admin",
+                        "collection": "",   # empty = auto-discover all collections
+                        "full": True,
+                    },
+                    expected_result="All collections in admin database pass full integrity validation",
+                    failure_impact="MongoDB storage engine may have corruption — do not promote to production"
+                ))
+
+            else:
+                # MongoDBResourceInfo: SSH-based tools are still used because
+                # all MongoDB MCP tools now go via SSH (mongosh on the remote VM).
+                # MCP tool signature: db_mongo_connect(ssh_host, ssh_user,
+                #   ssh_password, ssh_key_path, credential_id)
+                # The host field on MongoDBResourceInfo is the SSH host.
+                ssh_user_mongo = getattr(resource, "ssh_user", None)
+                ssh_password_mongo = getattr(resource, "ssh_password", None)
+                ssh_key_path_mongo = getattr(resource, "ssh_key_path", None)
+
+                checks.append(ValidationCheck(
+                    check_id="db_mongo_001",
+                    check_name="MongoDB Connection",
+                    check_type="database",
+                    priority=1,
+                    description=(
+                        "SSH into the VM and run db.adminCommand({ping:1}) via mongosh "
+                        "(db_mongo_connect is an SSH-based tool)."
+                    ),
+                    mcp_tool="db_mongo_connect",
+                    tool_args={
+                        "ssh_host": resource.host,
+                        "ssh_user": ssh_user_mongo,
+                        "ssh_password": ssh_password_mongo,
+                        "ssh_key_path": ssh_key_path_mongo,
+                    },
+                    expected_result="Successfully connected to MongoDB via SSH",
+                    failure_impact="Database is not accessible - critical failure"
+                ))
+
+                if validate_replica_set:
+                    checks.append(ValidationCheck(
+                        check_id="db_mongo_002",
+                        check_name="Replica Set Status",
+                        check_type="database",
+                        priority=2,
+                        description="SSH into the VM and run rs.status() via mongosh.",
+                        mcp_tool="db_mongo_rs_status",
+                        tool_args={
+                            "ssh_host": resource.host,
+                            "ssh_user": ssh_user_mongo,
+                            "ssh_password": ssh_password_mongo,
+                            "ssh_key_path": ssh_key_path_mongo,
+                        },
+                        expected_result="All replica set members are healthy and in sync",
+                        failure_impact="Replica set may have synchronization issues"
+                    ))
+
+            logger.info(f"Created {len(checks)} MongoDB validation checks")
+        
+        # Add VM-level health checks for database servers
+        if isinstance(resource, VMResourceInfo):
+            logger.info(f"Adding VM health checks for database server at {resource.host}")
+            vm_checks = self._get_vm_health_checks(resource, prefix="db")
+            checks.extend(vm_checks)
+
+        # If still no checks (no DB detected, not a VM), add generic SSH connectivity check
+        if not checks:
+            logger.info(
+                f"No specific database type detected for {resource.host} — "
+                "adding generic SSH health checks"
+            )
+            checks.extend(self._get_generic_checks(resource))
+
         return checks
     
     def _get_web_server_checks(self, resource: ResourceInfo) -> List[ValidationCheck]:
@@ -505,6 +618,12 @@ Priority Levels:
                 expected_result="Web server process (nginx/apache/httpd) is running",
                 failure_impact="Web server may not be serving requests"
             ))
+        
+        # Add VM-level health checks for web servers
+        if isinstance(resource, VMResourceInfo):
+            logger.info(f"Adding VM health checks for web server at {resource.host}")
+            vm_checks = self._get_vm_health_checks(resource, prefix="web")
+            checks.extend(vm_checks)
         
         return checks
     
@@ -571,6 +690,88 @@ Priority Levels:
                 failure_impact="System may have performance or stability issues"
             ))
         
+        return checks
+    
+    def _get_vm_health_checks(self, resource: VMResourceInfo, prefix: str = "vm") -> List[ValidationCheck]:
+        """Get standard VM-level health validation checks.
+        
+        This method provides comprehensive VM infrastructure validation that should
+        be added to all resource types running on VMs (databases, web servers, etc.).
+        
+        Args:
+            resource: VM resource information with SSH credentials
+            prefix: Prefix for check IDs (e.g., "db", "web", "app", "vm")
+        
+        Returns:
+            List of VM health validation checks (system resources, disk, services)
+        """
+        checks = []
+        
+        # Check 1: System Resources (CPU, Memory, Load)
+        checks.append(ValidationCheck(
+            check_id=f"{prefix}_vm_001",
+            check_name="VM System Resources",
+            check_type="system",
+            priority=2,
+            description="Check VM system load, memory usage, and uptime",
+            mcp_tool="vm_linux_uptime_load_mem",
+            tool_args={
+                "host": resource.host,
+                "username": resource.ssh_user,
+                "password": resource.ssh_password,
+                "key_path": resource.ssh_key_path
+            },
+            expected_result="System load and memory within acceptable limits",
+            failure_impact="High system load or low memory may affect performance"
+        ))
+        
+        # Check 2: Filesystem Usage
+        checks.append(ValidationCheck(
+            check_id=f"{prefix}_vm_002",
+            check_name="VM Filesystem Usage",
+            check_type="system",
+            priority=2,
+            description="Check disk space usage across all filesystems",
+            mcp_tool="vm_linux_fs_usage",
+            tool_args={
+                "host": resource.host,
+                "username": resource.ssh_user,
+                "password": resource.ssh_password,
+                "key_path": resource.ssh_key_path
+            },
+            expected_result="All filesystems below 85% usage",
+            failure_impact="Low disk space may cause application failures"
+        ))
+        
+        # Check 3: Critical Services (category-specific)
+        required_services = []
+        if prefix == "db":
+            # For database servers, check for Oracle or MongoDB services
+            required_services = ["oracle.service", "mongod.service"]
+        elif prefix == "web":
+            # For web servers, check for common web server services
+            required_services = ["nginx.service", "httpd.service", "apache2.service"]
+        
+        if required_services:
+            checks.append(ValidationCheck(
+                check_id=f"{prefix}_vm_003",
+                check_name="VM Critical Services",
+                check_type="system",
+                priority=3,
+                description=f"Verify critical services are running: {', '.join(required_services)}",
+                mcp_tool="vm_linux_services",
+                tool_args={
+                    "host": resource.host,
+                    "username": resource.ssh_user,
+                    "password": resource.ssh_password,
+                    "key_path": resource.ssh_key_path,
+                    "required": required_services
+                },
+                expected_result="At least one required service is active",
+                failure_impact="Missing services may indicate application is not running"
+            ))
+        
+        logger.info(f"Created {len(checks)} VM health checks with prefix '{prefix}'")
         return checks
 
 

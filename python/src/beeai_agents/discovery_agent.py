@@ -131,8 +131,9 @@ Provide a discovery plan with:
         self.memory_size = memory_size
         self.temperature = temperature
         
-        # MCP tools will be loaded on first use if not provided
-        self._mcp_tools = mcp_tools
+        # MCP tools will be loaded on first use if not provided.
+        # Typed as List[MCPTool] (never None after _ensure_mcp_tools runs).
+        self._mcp_tools: List[MCPTool] = mcp_tools if mcp_tools is not None else []
         self._mcp_client = None
         
         # Planning agent will be created on first use
@@ -254,16 +255,22 @@ Provide a discovery plan with:
         
         # Use LLM for complex cases
         logger.info("Creating AI-powered discovery plan...")
-        
+
         planning_agent = self._create_planning_agent()
-        
+
+        # Build credential context block — injected so the LLM knows which
+        # credentials to use when calling SSH-based discovery tools.
+        cred_lines = self._build_credential_context_block(resource)
+        cred_block = "\n".join(cred_lines)
+
         prompt = f"""# Discovery Planning Task
 
+{cred_block}
 ## Resource Information
 - **Host**: {resource.host}
 - **Type**: {resource.resource_type.value}
-- **SSH User**: {resource.ssh_user if hasattr(resource, 'ssh_user') else 'N/A'}
-- **SSH Port**: {resource.ssh_port if hasattr(resource, 'ssh_port') else 'N/A'}
+- **SSH User**: {getattr(resource, 'ssh_user', 'N/A')}
+- **SSH Port**: {getattr(resource, 'ssh_port', 22)}
 
 ## Your Task
 Create an optimal discovery plan for this resource using step-by-step reasoning.
@@ -271,13 +278,13 @@ Create an optimal discovery plan for this resource using step-by-step reasoning.
 ### Step 1: Resource Analysis
 What do we know about this resource? What type of workload might it run?
 
-### Step 2: Discovery Goals  
+### Step 2: Discovery Goals
 What specific information would be most valuable to discover?
 
 ### Step 3: Method Selection
 Which discovery methods should we use and why?
 - Port Scanning: Fast, identifies open ports
-- Process Scanning: Detailed, requires SSH
+- Process Scanning: Detailed, requires SSH (use credentials above)
 - Application Detection: Intelligent correlation
 
 ### Step 4: Efficiency Considerations
@@ -324,6 +331,41 @@ Respond with a JSON object containing:
             detect_applications=True,
             reasoning="Default comprehensive discovery plan (fallback)"
         )
+
+    @staticmethod
+    def _build_credential_context_block(resource) -> list:
+        """Build a credential context block for injection into LLM prompts.
+
+        The LLM must include these credentials in every tool_args that requires
+        SSH access.  This keeps the MCP server stateless w.r.t. credentials.
+
+        Args:
+            resource: ResourceInfo object with optional ssh_user / ssh_password.
+
+        Returns:
+            List of prompt lines (join with "\\n" before embedding).
+        """
+        lines = [
+            "## ⚠️  SSH CREDENTIALS FOR THIS SESSION",
+            "Use the values below in **every** tool call that requires SSH access.",
+            "```",
+            f"host:     {resource.host}",
+        ]
+        ssh_user = getattr(resource, "ssh_user", None)
+        ssh_password = getattr(resource, "ssh_password", None)
+        ssh_port = getattr(resource, "ssh_port", 22)
+        if ssh_user:
+            lines.append(f"username: {ssh_user}")
+            lines.append(
+                f"password: {ssh_password if ssh_password else '(key-based auth)'}"
+            )
+            lines.append(f"port:     {ssh_port}")
+        lines += [
+            "```",
+            "**Do NOT ask for credentials. Use the values above in every tool call.**",
+            "",
+        ]
+        return lines
     
     async def discover(
         self,
@@ -475,43 +517,103 @@ Respond with a JSON object containing:
         logger.info(f"Selected discovery strategy: {strategy}")
         
         # Strategy 1: Try comprehensive discovery first (best option)
+        comprehensive_success = False
         if strategy == "comprehensive":
-            logger.info("Using comprehensive discover_workload tool")
+            logger.info("="*60)
+            logger.info("ATTEMPTING COMPREHENSIVE DISCOVERY")
+            logger.info("="*60)
             try:
                 result = await self._execute_comprehensive_discovery(resource, plan)
-                # Check if result is empty (tool not fully implemented)
-                if len(result.applications) == 0 and len(result.ports) == 0 and len(result.processes) == 0:
-                    logger.warning("Comprehensive discovery returned empty results, falling back to individual tools")
-                    # Fallback to individual tools
-                    if "discover_os_only" in discovery_tools and "discover_applications" in discovery_tools:
-                        return await self._execute_individual_discovery(resource, plan)
-                return result
+                
+                # Check if result is valid and has data
+                has_data = (
+                    len(result.applications) > 0 or
+                    len(result.ports) > 0 or
+                    len(result.processes) > 0
+                )
+                
+                # Also check if OS was detected (not "Unknown")
+                os_detected = False
+                if hasattr(result, 'os_info') and result.os_info:
+                    os_name = result.os_info.get('os_name', 'Unknown')
+                    os_detected = os_name not in ['Unknown', '', None]
+                
+                logger.info(f"Comprehensive discovery result: has_data={has_data}, os_detected={os_detected}")
+                
+                if has_data or os_detected:
+                    logger.info("✓ Comprehensive discovery successful - returning result")
+                    comprehensive_success = True
+                    return result
+                else:
+                    logger.warning("✗ Comprehensive discovery returned empty/invalid results")
+                    logger.warning("  Applications: %d, Ports: %d, Processes: %d",
+                                 len(result.applications), len(result.ports), len(result.processes))
+                    logger.warning("  OS: %s", result.os_info.get('os_name', 'Unknown') if hasattr(result, 'os_info') and result.os_info else 'No OS info')
+                    logger.warning("  Falling back to individual tools...")
             except Exception as e:
-                logger.warning(f"Comprehensive discovery failed: {e}, falling back to individual tools")
-                # Fallback to individual tools
-                if "discover_os_only" in discovery_tools and "discover_applications" in discovery_tools:
-                    return await self._execute_individual_discovery(resource, plan)
+                logger.warning(f"✗ Comprehensive discovery failed with exception: {e}")
+                logger.warning("  Falling back to individual tools...")
         
-        # Strategy 2: Use individual tools (current approach)
-        elif strategy == "individual":
-            logger.info("Using individual discovery tools (os + applications)")
-            return await self._execute_individual_discovery(resource, plan)
+        # Strategy 2: Fallback to individual tools (ALWAYS try if comprehensive failed)
+        if not comprehensive_success and strategy in ["individual", "comprehensive"]:
+            if "discover_os_only" in discovery_tools and "discover_applications" in discovery_tools:
+                logger.info("="*60)
+                logger.info("ATTEMPTING INDIVIDUAL DISCOVERY")
+                logger.info("="*60)
+                try:
+                    result = await self._execute_individual_discovery(resource, plan)
+                    if result:
+                        # Validate individual discovery result
+                        has_data = (
+                            len(result.applications) > 0 or
+                            len(result.ports) > 0 or
+                            len(result.processes) > 0
+                        )
+                        logger.info(f"Individual discovery result: has_data={has_data}")
+                        logger.info(f"  Applications: {len(result.applications)}, Ports: {len(result.ports)}, Processes: {len(result.processes)}")
+                        
+                        if has_data:
+                            logger.info("✓ Individual discovery successful - returning result")
+                            return result
+                        else:
+                            logger.warning("✗ Individual discovery returned empty results")
+                except Exception as e:
+                    logger.warning(f"✗ Individual discovery failed: {e}")
+            else:
+                logger.warning("Individual discovery tools not available")
+                logger.warning(f"  Available tools: {discovery_tools}")
         
-        # Strategy 3: Fallback to raw data collection
-        elif strategy == "raw_data":
-            logger.info("Using raw data collection (LLM analysis not yet implemented)")
-            return await self._execute_raw_data_discovery(resource, plan)
+        # Strategy 3: Fallback to raw data collection (if individual also failed)
+        if strategy in ["raw_data", "individual", "comprehensive"]:
+            if "get_raw_server_data" in discovery_tools:
+                logger.info("="*60)
+                logger.info("ATTEMPTING RAW DATA COLLECTION")
+                logger.info("="*60)
+                try:
+                    result = await self._execute_raw_data_discovery(resource, plan)
+                    if result:
+                        logger.info("✓ Raw data collection successful - returning result")
+                        return result
+                except Exception as e:
+                    logger.warning(f"✗ Raw data collection failed: {e}")
+            else:
+                logger.warning("Raw data collection tool not available")
         
-        # Strategy 4: No discovery tools available
-        else:
-            logger.error(f"No discovery tools available. Available tools: {available_tool_names}")
-            return WorkloadDiscoveryResult(
-                host=resource.host,
-                ports=[],
-                processes=[],
-                applications=[],
-                discovery_time=datetime.now()
-            )
+        # All strategies failed - return minimal result
+        logger.error("="*60)
+        logger.error("ALL DISCOVERY STRATEGIES FAILED")
+        logger.error("="*60)
+        logger.error(f"Available tools: {available_tool_names}")
+        logger.error(f"Discovery tools: {discovery_tools}")
+        logger.error(f"Strategy attempted: {strategy}")
+        
+        return WorkloadDiscoveryResult(
+            host=resource.host,
+            ports=[],
+            processes=[],
+            applications=[],
+            discovery_time=datetime.now()
+        )
     
     async def _execute_comprehensive_discovery(
         self,
@@ -527,6 +629,12 @@ Respond with a JSON object containing:
         Returns:
             WorkloadDiscoveryResult
         """
+        logger.info("Starting comprehensive discovery...")
+        logger.info(f"  Host: {resource.host}")
+        logger.info(f"  SSH User: {getattr(resource, 'ssh_user', 'NOT SET')}")
+        logger.info(f"  SSH Password: {'SET' if getattr(resource, 'ssh_password', None) else 'NOT SET'}")
+        logger.info(f"  SSH Port: {getattr(resource, 'ssh_port', 22)}")
+        
         # Find the tool dynamically
         workload_tool = next(
             (tool for tool in self._mcp_tools if tool.name == "discover_workload"),
@@ -534,7 +642,10 @@ Respond with a JSON object containing:
         )
         
         if not workload_tool:
+            logger.error("discover_workload tool not found in MCP tools")
             raise Exception("discover_workload tool not found")
+        
+        logger.info(f"✓ Found discover_workload tool")
         
         # Prepare arguments
         tool_args = {
@@ -548,16 +659,23 @@ Respond with a JSON object containing:
         # Add SSH credentials
         if hasattr(resource, 'ssh_user') and resource.ssh_user:
             tool_args["ssh_user"] = resource.ssh_user
+            logger.info(f"  Added SSH user: {resource.ssh_user}")
         if hasattr(resource, 'ssh_password') and resource.ssh_password:
             tool_args["ssh_password"] = resource.ssh_password
+            logger.info(f"  Added SSH password: {'*' * len(resource.ssh_password)}")
         if hasattr(resource, 'ssh_key_path') and resource.ssh_key_path:
             tool_args["ssh_key_path"] = resource.ssh_key_path
+            logger.info(f"  Added SSH key path: {resource.ssh_key_path}")
         if hasattr(resource, 'ssh_port'):
             tool_args["ssh_port"] = resource.ssh_port
+            logger.info(f"  Added SSH port: {resource.ssh_port}")
         
-        logger.info(f"Calling discover_workload for {resource.host}")
-        logger.info(f"Tool arguments: {tool_args}")
+        logger.info(f"Calling discover_workload with {len(tool_args)} arguments")
+        logger.debug(f"Tool arguments (excluding password): {dict((k, v) for k, v in tool_args.items() if k != 'ssh_password')}")
+        
         result_output = await workload_tool.run(input=tool_args)
+        logger.info(f"✓ Tool execution completed")
+        logger.debug(f"Result output type: {type(result_output)}")
         
         # Parse result
         import json

@@ -135,3 +135,9 @@ python/cyberres-mcp/.venv/*
 python/cyberres-mcp/__pycache__/*
 python/cyberres-mcp/plugins/__pycache__/
 secrets.config.json
+
+# BeeAI credentials - NEVER commit these
+python/src/config/secrets.json
+python/src/logs/
+*.secrets.json
+secrets.json

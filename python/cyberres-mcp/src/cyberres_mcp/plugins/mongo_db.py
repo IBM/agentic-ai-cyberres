@@ -613,9 +613,10 @@ def attach(mcp):
         collection: str = "",
         full: bool = True,
     ) -> Dict[str, Any]:
-        """[MongoDB][SSH] Validate collection integrity using `validate({full})`."""
-        if not collection:
-            return err("collection is required", code="INPUT_ERROR", via="ssh_mongo_shell")
+        """[MongoDB][SSH] Validate collection integrity using `validate({full})`.
+
+        If `collection` is omitted, validates all non-system collections in `db_name`.
+        """
 
         ssh_user, ssh_password, ssh_key_path, ssh_err = _resolve_ssh_auth_inputs(
             ssh_user=ssh_user,
@@ -653,52 +654,182 @@ def attach(mcp):
                 discovery=discovery,
             )
 
-        js = (
+        def _validate_one_collection(target_collection: str) -> Dict[str, Any]:
+            js = (
+                "JSON.stringify("
+                f"db.getSiblingDB('{_js_quote(db_name)}')"
+                f".getCollection('{_js_quote(target_collection)}')"
+                f".validate({{full: {str(full).lower()}}})"
+                ")"
+            )
+            exec_res = _run_mongo_eval_via_ssh(
+                ssh_host=ssh_host,
+                ssh_user=ssh_user,
+                ssh_password=ssh_password,
+                ssh_key_path=ssh_key_path,
+                shell_bin=shell_bin,
+                mongo_port=int(discovery["selected_port"]),
+                js_code=js,
+                mongo_user=mongo_user,
+                mongo_password=mongo_password,
+                auth_db="admin",
+            )
+            if not exec_res.get("ok"):
+                return {
+                    "ok": False,
+                    "exec_error": {
+                        "message": str(exec_res.get("message", "Mongo SSH command failed")),
+                        "code": str(exec_res.get("code", "MONGO_ERROR")),
+                        "rc": exec_res.get("rc"),
+                        "stderr": exec_res.get("stderr"),
+                        "stdout": exec_res.get("stdout"),
+                        "attempts": exec_res.get("attempts"),
+                    },
+                }
+
+            data = exec_res["data"] if isinstance(exec_res.get("data"), dict) else {}
+            valid = bool(data.get("valid", data.get("ok", 0)))
+            result: Dict[str, Any] = {
+                "via": "ssh_mongo_shell",
+                "db": db_name,
+                "collection": target_collection,
+                "full": full,
+                "validate": data,
+                "connection": {"mode": exec_res.get("mode")},
+                "discovery": discovery,
+            }
+            for key in ("errors", "warnings", "nIndexes", "nrecords", "repaired"):
+                if key in data:
+                    result[key] = data[key]
+            return {"ok": valid, "result": result}
+
+        # Single collection mode (backward-compatible response shape)
+        if collection:
+            single = _validate_one_collection(collection)
+            if single.get("exec_error"):
+                exec_error = single["exec_error"]
+                return err(
+                    str(exec_error.get("message", "Mongo SSH command failed")),
+                    code=str(exec_error.get("code", "MONGO_ERROR")),
+                    rc=exec_error.get("rc"),
+                    stderr=exec_error.get("stderr"),
+                    stdout=exec_error.get("stdout"),
+                    attempts=exec_error.get("attempts"),
+                    discovery=discovery,
+                    via="ssh_mongo_shell",
+                )
+
+            result = single["result"]
+            if single.get("ok"):
+                return ok(result)
+            return err("collection validation reported invalid", code="VALIDATE_FAILED", **result)
+
+        # Multi-collection mode
+        list_collections_js = (
             "JSON.stringify("
-            f"db.getSiblingDB('{_js_quote(db_name)}')"
-            f".getCollection('{_js_quote(collection)}')"
-            f".validate({{full: {str(full).lower()}}})"
+            f"db.getSiblingDB('{_js_quote(db_name)}').getCollectionNames()"
             ")"
         )
-        exec_res = _run_mongo_eval_via_ssh(
+        list_exec = _run_mongo_eval_via_ssh(
             ssh_host=ssh_host,
             ssh_user=ssh_user,
             ssh_password=ssh_password,
             ssh_key_path=ssh_key_path,
             shell_bin=shell_bin,
             mongo_port=int(discovery["selected_port"]),
-            js_code=js,
+            js_code=list_collections_js,
             mongo_user=mongo_user,
             mongo_password=mongo_password,
             auth_db="admin",
         )
-        if not exec_res.get("ok"):
+        if not list_exec.get("ok"):
             return err(
-                str(exec_res.get("message", "Mongo SSH command failed")),
-                code=str(exec_res.get("code", "MONGO_ERROR")),
-                rc=exec_res.get("rc"),
-                stderr=exec_res.get("stderr"),
-                stdout=exec_res.get("stdout"),
-                attempts=exec_res.get("attempts"),
+                str(list_exec.get("message", "Mongo SSH command failed")),
+                code=str(list_exec.get("code", "MONGO_ERROR")),
+                rc=list_exec.get("rc"),
+                stderr=list_exec.get("stderr"),
+                stdout=list_exec.get("stdout"),
+                attempts=list_exec.get("attempts"),
                 discovery=discovery,
                 via="ssh_mongo_shell",
             )
 
-        data = exec_res["data"] if isinstance(exec_res.get("data"), dict) else {}
-        valid = bool(data.get("valid", data.get("ok", 0)))
-        result: Dict[str, Any] = {
+        raw_names = list_exec.get("data")
+        if not isinstance(raw_names, list):
+            return err(
+                "Could not parse collection list from Mongo shell output",
+                code="PARSE_ERROR",
+                discovery=discovery,
+                via="ssh_mongo_shell",
+            )
+
+        all_collections = [name for name in raw_names if isinstance(name, str) and name.strip()]
+        non_system_collections = [name for name in all_collections if not name.startswith("system.")]
+        target_collections = non_system_collections if non_system_collections else all_collections
+
+        if not target_collections:
+            return ok({
+                "via": "ssh_mongo_shell",
+                "db": db_name,
+                "full": full,
+                "message": "No collections found to validate",
+                "discovered_collections": all_collections,
+                "validated_collections": [],
+                "summary": {
+                    "total": 0,
+                    "passed": 0,
+                    "failed": 0,
+                    "errors": 0,
+                },
+                "results": [],
+                "discovery": discovery,
+            })
+
+        results: List[Dict[str, Any]] = []
+        passed = 0
+        failed = 0
+        errors = 0
+        for target_collection in target_collections:
+            single = _validate_one_collection(target_collection)
+            if single.get("exec_error"):
+                exec_error = single["exec_error"]
+                errors += 1
+                results.append({
+                    "collection": target_collection,
+                    "status": "ERROR",
+                    "error": exec_error,
+                })
+                continue
+
+            single_result = single["result"]
+            if single.get("ok"):
+                passed += 1
+                status = "PASS"
+            else:
+                failed += 1
+                status = "FAIL"
+            results.append({
+                "collection": target_collection,
+                "status": status,
+                "details": single_result,
+            })
+
+        payload = {
             "via": "ssh_mongo_shell",
             "db": db_name,
-            "collection": collection,
             "full": full,
-            "validate": data,
-            "connection": {"mode": exec_res.get("mode")},
+            "discovered_collections": all_collections,
+            "validated_collections": target_collections,
+            "summary": {
+                "total": len(target_collections),
+                "passed": passed,
+                "failed": failed,
+                "errors": errors,
+            },
+            "results": results,
             "discovery": discovery,
         }
-        for key in ("errors", "warnings", "nIndexes", "nrecords", "repaired"):
-            if key in data:
-                result[key] = data[key]
 
-        if valid:
-            return ok(result)
-        return err("collection validation reported invalid", code="VALIDATE_FAILED", **result)
+        if failed > 0 or errors > 0:
+            return err("one or more collection validations failed", code="VALIDATE_FAILED", **payload)
+        return ok(payload)

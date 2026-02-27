@@ -1,10 +1,27 @@
 #
 # Copyright contributors to the agentic-ai-cyberres project
 #
-"""Agent framework for validation workflow."""
+"""
+Agents package - BeeAI-powered validation agents.
 
-from agents.base import BaseAgent
+Agents:
+    - base: Base agent class with common functionality
+    - discovery: Discovers workloads and applications on target systems
+    - validation: Validates resources against acceptance criteria
+    - evaluation: Evaluates validation results and generates insights
+    - orchestrator: Coordinates the multi-agent validation workflow
+"""
 
-__all__ = ['BaseAgent']
+from agents.base import BaseValidationAgent, RetryMixin, CacheMixin
+from agents.orchestrator import BeeAIValidationOrchestrator, WorkflowResult, WorkflowState
+
+__all__ = [
+    "BaseValidationAgent",
+    "RetryMixin",
+    "CacheMixin",
+    "BeeAIValidationOrchestrator",
+    "WorkflowResult",
+    "WorkflowState",
+]
 
 # Made with Bob

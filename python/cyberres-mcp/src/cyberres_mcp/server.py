@@ -308,16 +308,37 @@ def create_app() -> FastMCP:
     return app
 
 
+def _is_broken_pipe(exc: BaseException) -> bool:
+    """Return True if exc is (or contains) a BrokenPipeError."""
+    if isinstance(exc, BrokenPipeError):
+        return True
+    # Python 3.11+ ExceptionGroup — check sub-exceptions
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_is_broken_pipe(e) for e in exc.exceptions)
+    return False
+
+
 def main() -> None:
     """Entry point for running the MCP server."""
     app = create_app()
-    
-    # stdio transport doesn't use host/port
-    if SETTINGS.transport == "stdio":
-        app.run(transport="stdio")
-    else:
-        # HTTP transports need host and port
-        app.run(transport=SETTINGS.transport, host=SETTINGS.host, port=SETTINGS.port)
+
+    try:
+        # stdio transport doesn't use host/port
+        if SETTINGS.transport == "stdio":
+            app.run(transport="stdio")
+        else:
+            # HTTP transports need host and port
+            app.run(transport=SETTINGS.transport, host=SETTINGS.host, port=SETTINGS.port)
+    except (BrokenPipeError, OSError):
+        # Client disconnected before we finished flushing — normal for stdio MCP.
+        # Suppress the traceback so it doesn't pollute the parent process console.
+        pass
+    except BaseException as exc:  # noqa: BLE001
+        if _is_broken_pipe(exc):
+            # ExceptionGroup wrapping a BrokenPipeError — same situation.
+            pass
+        else:
+            raise
 
 
 if __name__ == "__main__":
