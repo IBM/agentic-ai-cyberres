@@ -228,6 +228,11 @@ class BeeAIValidationOrchestrator:
                 "PYTHONUNBUFFERED": "1",
                 "LOG_LEVEL": "WARNING",  # read by server.py basicConfig
                 "LOGURU_LEVEL": "WARNING",
+                # SSH host-key settings: trust unknown hosts so the MCP server
+                # can connect to VMs whose keys aren't in known_hosts yet.
+                # This is safe for internal infrastructure validation use cases.
+                "SSH_STRICT_HOST_KEY_CHECKING": "false",
+                "SSH_TRUST_UNKNOWN_HOSTS": "true",
             },
         )
         

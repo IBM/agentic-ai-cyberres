@@ -1,0 +1,49 @@
+{
+  "_comment": "Fleet manifest example — copy to fleet.json and edit. fleet.json is gitignored.",
+
+  "name": "Production Fleet",
+
+  "max_parallel": 3,
+
+  "email_report_to": "ops-team@example.com",
+
+  "targets": [
+    {
+      "host": "192.168.1.100",
+      "label": "prod-web-01",
+      "credential_id": "vm-prod",
+      "tags": ["web", "production"],
+      "enabled": true
+    },
+    {
+      "host": "192.168.1.101",
+      "label": "prod-web-02",
+      "credential_id": "vm-prod",
+      "tags": ["web", "production"],
+      "enabled": true
+    },
+    {
+      "host": "db.example.com",
+      "label": "prod-oracle-01",
+      "credential_id": "oracle-prod",
+      "tags": ["database", "oracle", "production"],
+      "enabled": true
+    },
+    {
+      "host": "mongo.example.com",
+      "label": "prod-mongo-01",
+      "credential_id": "mongo-prod",
+      "tags": ["database", "mongodb", "production"],
+      "enabled": true,
+      "email_report_to": "dba-team@example.com"
+    },
+    {
+      "host": "192.168.1.200",
+      "label": "staging-vm-01",
+      "credential_id": "vm-staging",
+      "tags": ["staging"],
+      "enabled": false,
+      "_comment": "Set enabled=true to include this target in the fleet run"
+    }
+  ]
+}

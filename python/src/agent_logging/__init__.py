@@ -2,49 +2,27 @@
 # Copyright contributors to the agentic-ai-cyberres project
 #
 """
-Logging package for BeeAI validation agents.
+Agent logging package for BeeAI recovery-validation workflow.
 
-Provides dual-stream logging:
-- Console: Clean, coloured, human-readable agent activity
-- File: Structured JSON lines with full context for debugging
+Provides structured dual-stream logging:
+  - Console: clean agent role banners at INFO level
+  - File:    JSON-structured DEBUG events for post-run analysis
 
-Quick start:
-    from agent_logging import setup_logging, AgentTracker
+Usage::
 
-    log_file = setup_logging(log_dir="logs")
+    from agent_logging.agent_logger import setup_logging, AgentTracker, WorkflowProgressDisplay
+
+    log_file = setup_logging(log_dir="logs", log_level="DEBUG", console_level="INFO")
     tracker = AgentTracker("DiscoveryAgent", resource="192.168.1.100")
-
-    with tracker.phase("discovery"):
-        tracker.decision("Scanning standard ports")
-        tracker.tool_call("scan_ports", {"host": "192.168.1.100"})
+    tracker.start("Scanning workloads")
 """
 
 from agent_logging.agent_logger import (
     setup_logging,
-    get_agent_logger,
-    get_log_file,
     AgentTracker,
     WorkflowProgressDisplay,
-    ConsoleFormatter,
-    FileFormatter,
-    Colours,
-    AGENT_COLOURS,
-    PHASE_ICONS,
-    STATUS_ICONS,
 )
 
-__all__ = [
-    "setup_logging",
-    "get_agent_logger",
-    "get_log_file",
-    "AgentTracker",
-    "WorkflowProgressDisplay",
-    "ConsoleFormatter",
-    "FileFormatter",
-    "Colours",
-    "AGENT_COLOURS",
-    "PHASE_ICONS",
-    "STATUS_ICONS",
-]
+__all__ = ["setup_logging", "AgentTracker", "WorkflowProgressDisplay"]
 
 # Made with Bob

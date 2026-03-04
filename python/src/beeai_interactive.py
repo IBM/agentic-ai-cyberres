@@ -61,9 +61,92 @@ from models import (
     ValidationRequest,
     ValidationReport,
     VMResourceInfo,
+    FleetManifest,
+    FleetReport,
+    FleetTargetResult,
+    FleetTargetStatus,
 )
 from email_service import EmailService
 from credentials import CredentialResolver, CredentialNotFoundError
+from fleet_orchestrator import FleetOrchestrator
+
+
+# ── Fleet Progress Display ────────────────────────────────────────────────────
+
+class FleetProgressDisplay:
+    """
+    Live per-target status table for fleet validation runs.
+
+    Printed once at the start, then each target row is updated in-place
+    using ANSI cursor-up sequences so the table stays on screen.
+
+    Example output::
+
+        ┌─────────────────────────────────────────────────────────────┐
+        │  🚀 Fleet: Production Fleet  (4 targets, max_parallel=3)    │
+        ├──────────────────────────┬────────────┬───────┬─────────────┤
+        │  Target                  │  Status    │ Score │  Time       │
+        ├──────────────────────────┼────────────┼───────┼─────────────┤
+        │  prod-web-01             │ ✅ done    │  92   │  18.3s      │
+        │  prod-db-01              │ 🔄 running │   —   │   —         │
+        │  prod-cache-01           │ ⏳ pending │   —   │   —         │
+        │  prod-app-01             │ ⏳ pending │   —   │   —         │
+        └──────────────────────────┴────────────┴───────┴─────────────┘
+    """
+
+    _COL_TARGET = 26
+    _COL_STATUS = 12
+    _COL_SCORE  = 7
+    _COL_TIME   = 10
+
+    def __init__(self, manifest: FleetManifest):
+        self._manifest = manifest
+        self._results: list[FleetTargetResult] = []
+        self._printed = False
+
+    def attach(self, results: list[FleetTargetResult]) -> None:
+        """Attach the live results list (mutated by FleetOrchestrator workers)."""
+        self._results = results
+
+    def render(self, *, final: bool = False) -> None:
+        """Print (or re-print) the status table."""
+        W = self._COL_TARGET
+        S = self._COL_STATUS
+        SC = self._COL_SCORE
+        T = self._COL_TIME
+
+        lines: list[str] = []
+        name = self._manifest.name
+        n = len(self._manifest.enabled_targets)
+        mp = self._manifest.max_parallel
+        lines.append(f"\n  🚀 Fleet: {name}  ({n} target(s), max_parallel={mp})")
+        lines.append(f"  {'─'*W}  {'─'*S}  {'─'*SC}  {'─'*T}")
+        lines.append(f"  {'Target':<{W}}  {'Status':<{S}}  {'Score':>{SC}}  {'Time':>{T}}")
+        lines.append(f"  {'─'*W}  {'─'*S}  {'─'*SC}  {'─'*T}")
+
+        for r in self._results:
+            label = r.target.display_name[:W]
+            status_str = r.display_status[:S]
+            score_str  = str(r.score) if r.score is not None else "—"
+            time_str   = f"{r.execution_time_seconds:.1f}s" if r.execution_time_seconds else "—"
+            lines.append(
+                f"  {label:<{W}}  {status_str:<{S}}  {score_str:>{SC}}  {time_str:>{T}}"
+            )
+
+        lines.append(f"  {'─'*W}  {'─'*S}  {'─'*SC}  {'─'*T}")
+
+        if final:
+            done    = sum(1 for r in self._results if r.status == FleetTargetStatus.DONE)
+            failed  = sum(1 for r in self._results if r.status == FleetTargetStatus.FAILED)
+            skipped = sum(1 for r in self._results if r.status == FleetTargetStatus.SKIPPED)
+            scores  = [r.score for r in self._results if r.score is not None]
+            avg_str = f"{sum(scores)/len(scores):.0f}/100" if scores else "n/a"
+            lines.append(
+                f"\n  ✅ {done} passed  ❌ {failed} failed  ⏭  {skipped} skipped  "
+                f"avg score {avg_str}"
+            )
+
+        print("\n".join(lines))
 
 
 class BeeAIInteractiveCLI:
@@ -74,6 +157,7 @@ class BeeAIInteractiveCLI:
     - Credentials loaded from config/secrets.json (no passwords in prompts)
     - Enhanced logging: agent activity visible on console, full detail in log file
     - Credential ID support: reference credentials by name in prompts
+    - Fleet mode: validate multiple VMs/resources in one command
     """
 
     def __init__(self):
@@ -338,7 +422,7 @@ class BeeAIInteractiveCLI:
             raise CredentialNotFoundError(
                 f"SSH username not found for {host}. "
                 "Add credentials to config/secrets.json:\n"
-                '  "<credential-id>": { "hosts": ["<IP>"], "ssh": { "username": "...", "password": "..." } }'
+                f'  "{host}": {{ "ssh": {{ "username": "root", "password": "..." }} }}'
             )
 
         # ── Build VMResourceInfo — agent discovers what's running ─────────────
@@ -532,6 +616,157 @@ class BeeAIInteractiveCLI:
             print(f"  ❌ Email error: {e}")
             logger.error(f"Email send failed: {e}", exc_info=True, extra={"agent": "Orchestrator"})
 
+    # ── Fleet validation ──────────────────────────────────────────────────────
+
+    async def execute_fleet_validation(self, prompt: str) -> None:
+        """
+        Execute fleet validation from a prompt or fleet.json manifest.
+
+        Supported prompt patterns::
+
+            "validate fleet from fleet.json"
+            "validate fleet from config/my-fleet.json"
+            "validate fleet 192.168.1.100 192.168.1.101 192.168.1.102"
+            "validate 192.168.1.100, 192.168.1.101, 192.168.1.102"
+
+        Args:
+            prompt: Natural language fleet prompt.
+        """
+        print(f"\n{'─'*65}")
+        print(f"  💬 {prompt}")
+        print(f"{'─'*65}")
+
+        fleet_tracker = AgentTracker("FleetOrchestrator")
+
+        try:
+            manifest = self._parse_fleet_prompt(prompt)
+        except Exception as e:
+            fleet_tracker.error(f"Failed to parse fleet prompt: {e}", exc=e)
+            print(f"\n  ❌ Fleet parse error: {e}")
+            return
+
+        fleet_tracker.decision(
+            f"Fleet '{manifest.name}': {len(manifest.enabled_targets)} target(s), "
+            f"max_parallel={manifest.max_parallel}"
+        )
+
+        # Build result placeholders and attach to progress display
+        from models import FleetTargetResult, FleetTargetStatus
+        results: list[FleetTargetResult] = [
+            FleetTargetResult(target=t, status=FleetTargetStatus.PENDING)
+            for t in manifest.enabled_targets
+        ]
+        progress = FleetProgressDisplay(manifest)
+        progress.attach(results)
+        progress.render()
+
+        # Run fleet
+        fleet_orch = FleetOrchestrator(self)
+        # Monkey-patch _run_one to update display after each target finishes
+        _orig_run_one = fleet_orch._run_one
+
+        async def _run_one_with_display(target, result, semaphore, fleet_email):
+            await _orig_run_one(target, result, semaphore, fleet_email)
+            progress.render()
+
+        fleet_orch._run_one = _run_one_with_display  # type: ignore[method-assign]
+
+        start = __import__("time").time()
+        report = await fleet_orch.run_fleet(manifest)
+        elapsed = __import__("time").time() - start
+
+        # Final display
+        progress.render(final=True)
+        self._display_fleet_report(report, elapsed)
+
+    def _parse_fleet_prompt(self, prompt: str) -> FleetManifest:
+        """
+        Parse a fleet prompt into a FleetManifest.
+
+        Handles three forms:
+        1. ``validate fleet from <path>``  — load JSON file
+        2. ``validate fleet <ip1> <ip2> …`` — ad-hoc list
+        3. Multiple IPs/hostnames anywhere in the prompt — auto-detect
+
+        Args:
+            prompt: Raw user prompt.
+
+        Returns:
+            Validated FleetManifest.
+        """
+        import re as _re
+
+        # Form 1: explicit file path
+        file_match = _re.search(
+            r'(?:from|file|manifest)\s+([\w./\\-]+\.json)',
+            prompt, _re.IGNORECASE
+        )
+        if file_match:
+            path = file_match.group(1)
+            logger.info(f"Loading fleet manifest from {path}", extra={"agent": "FleetOrchestrator"})
+            return FleetOrchestrator.load_manifest(path)
+
+        # Form 2 & 3: extract IPs / hostnames from prompt
+        # Match IPv4 addresses
+        ips = _re.findall(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b', prompt)
+        # Match hostnames (word chars + dots/hyphens, not pure numbers)
+        # Only pick up tokens after "fleet" keyword or comma-separated
+        if not ips:
+            # Try comma/space separated hostnames after "fleet" keyword
+            after_fleet = _re.search(r'fleet\s+(.*)', prompt, _re.IGNORECASE)
+            if after_fleet:
+                tokens = _re.split(r'[\s,]+', after_fleet.group(1).strip())
+                ips = [t for t in tokens if t and not t.lower().startswith('from')]
+
+        if not ips:
+            raise ValueError(
+                "Could not extract hosts from fleet prompt.\n"
+                "Use: 'validate fleet 192.168.1.100 192.168.1.101'\n"
+                "  or: 'validate fleet from config/fleet.json'"
+            )
+
+        # Extract optional max_parallel hint: "parallel 5" or "concurrency 5"
+        par_match = _re.search(r'(?:parallel|concurrency|workers?)\s+(\d+)', prompt, _re.IGNORECASE)
+        max_parallel = int(par_match.group(1)) if par_match else 3
+
+        # Extract optional email
+        email_match = _re.search(
+            r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', prompt
+        )
+        email = email_match.group(0) if email_match else None
+
+        return FleetOrchestrator.manifest_from_hosts(
+            hosts=ips,
+            max_parallel=max_parallel,
+            fleet_name=f"Ad-hoc Fleet ({len(ips)} hosts)",
+            email=email,
+        )
+
+    def _display_fleet_report(self, report: FleetReport, elapsed: float) -> None:
+        """Print the final fleet summary."""
+        print(f"\n{'═'*65}")
+        print(f"  📊 Fleet Report: {report.fleet_name}")
+        print(f"{'═'*65}")
+        print(f"\n  Status  : {report.overall_status.upper()}")
+        print(f"  Targets : {report.total_targets}")
+        print(f"  ✅ Passed : {report.succeeded}")
+        print(f"  ❌ Failed : {report.failed}")
+        if report.skipped:
+            print(f"  ⏭  Skipped: {report.skipped}")
+        if report.average_score is not None:
+            print(f"  Avg Score: {report.average_score:.0f}/100")
+        print(f"  Time    : {elapsed:.1f}s")
+
+        # Per-target detail for failures
+        failures = [r for r in report.results if r.status == FleetTargetStatus.FAILED]
+        if failures:
+            print(f"\n  Failed targets:")
+            for r in failures:
+                print(f"    ❌ {r.target.display_name}: {r.error_message or 'unknown error'}")
+
+        print(f"\n  📝 Full logs: {log_file}")
+        print(f"{'═'*65}\n")
+
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     async def run(self):
@@ -541,12 +776,15 @@ class BeeAIInteractiveCLI:
         print(f"\n{'═'*65}")
         print("  💬 Ready! Describe what you want to validate.")
         print(f"{'═'*65}")
-        print("\n  Examples:")
+        print("\n  Single-target examples:")
         print("    • Validate VM at 192.168.1.100")
         print("    • Check Oracle database at db.example.com")
         print("    • Validate MongoDB at mongo-server:27017")
         print("    • Validate VM at 192.168.1.100 and email report to me@example.com")
         print("    • Use credential vm-prod-01 to validate 192.168.1.100")
+        print("\n  Fleet (multi-target) examples:")
+        print("    • Validate fleet 192.168.1.100 192.168.1.101 192.168.1.102")
+        print("    • Validate fleet from config/fleet.json")
         print("\n  Type 'list credentials' to see available credentials")
         print("  Type 'quit' to exit")
         print(f"\n{'─'*65}")
@@ -572,7 +810,14 @@ class BeeAIInteractiveCLI:
                     self._show_help()
                     continue
 
-                await self.execute_validation(prompt)
+                # ── Fleet mode detection ──────────────────────────────────────
+                # Trigger fleet mode when:
+                #   a) prompt contains "fleet" keyword, OR
+                #   b) prompt contains 2+ distinct IPv4 addresses
+                if self._is_fleet_prompt(prompt):
+                    await self.execute_fleet_validation(prompt)
+                else:
+                    await self.execute_validation(prompt)
 
             except KeyboardInterrupt:
                 print("\n\n  👋 Interrupted. Goodbye!")
@@ -584,6 +829,20 @@ class BeeAIInteractiveCLI:
         # Cleanup
         if self.orchestrator:
             await self.orchestrator.cleanup()
+
+    def _is_fleet_prompt(self, prompt: str) -> bool:
+        """
+        Return True if the prompt should trigger fleet mode.
+
+        Fleet mode is triggered when:
+        - The word "fleet" appears in the prompt, OR
+        - Two or more distinct IPv4 addresses are present.
+        """
+        import re as _re
+        if _re.search(r'\bfleet\b', prompt, _re.IGNORECASE):
+            return True
+        ips = _re.findall(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b', prompt)
+        return len(set(ips)) >= 2
 
     def _list_credentials(self):
         """Display available credentials."""
@@ -614,17 +873,27 @@ class BeeAIInteractiveCLI:
   ║    help / ?          — Show this help                        ║
   ║    quit / exit       — Exit the agent                        ║
   ║                                                              ║
-  ║  VALIDATION PROMPTS                                          ║
+  ║  SINGLE-TARGET PROMPTS                                       ║
   ║    Validate VM at <IP>                                       ║
   ║    Check Oracle at <host> [port <N>] [service <name>]        ║
   ║    Validate MongoDB at <host>[:<port>]                       ║
   ║    Use credential <id> to validate <host>                    ║
   ║    ... and email report to <email>                           ║
   ║                                                              ║
+  ║  FLEET (MULTI-TARGET) PROMPTS                                ║
+  ║    Validate fleet <ip1> <ip2> <ip3>                          ║
+  ║    Validate fleet from config/fleet.json                     ║
+  ║    Validate fleet <ip1> <ip2> parallel 5                     ║
+  ║    (2+ IPs in one prompt also triggers fleet mode)           ║
+  ║                                                              ║
   ║  CREDENTIALS                                                 ║
   ║    Add credentials to: config/secrets.json                   ║
   ║    Credentials are looked up by hostname/IP automatically.   ║
   ║    Never put passwords in your prompts.                      ║
+  ║                                                              ║
+  ║  FLEET MANIFEST                                              ║
+  ║    Create config/fleet.json from the example:                ║
+  ║      cp config/fleet.example.json config/fleet.json          ║
   ║                                                              ║
   ║  LOGS                                                        ║
   ║    Console: Clean agent activity summary                     ║

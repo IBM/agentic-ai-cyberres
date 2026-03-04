@@ -88,6 +88,7 @@ class EmailService:
             
             # Send email
             logger.info(f"SMTP Details {self.smtp_server}")
+            logger.info(f"SMTP Details {self.smtp_username}")
             logger.info(f"Sending validation report to {recipient}")
             
             with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:

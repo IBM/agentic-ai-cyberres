@@ -141,3 +141,32 @@ python/src/config/secrets.json
 python/src/logs/
 *.secrets.json
 secrets.json
+
+# =============================================================================
+# BeeAI Agent — secrets and runtime files (NEVER commit these)
+# =============================================================================
+# Credential store — contains real passwords
+python/src/config/secrets.json
+**/config/secrets.json
+
+# Fleet manifest — may contain real hostnames/IPs/labels
+python/src/config/fleet.json
+**/config/fleet.json
+
+# Agent log files
+python/src/logs/
+**/logs/*.log
+**/logs/*.jsonl
+
+# Python virtual environments and caches
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Environment files with real credentials
+# (committed .env files must only contain CHANGE_ME placeholders)
+.env.local
+.env.*.local

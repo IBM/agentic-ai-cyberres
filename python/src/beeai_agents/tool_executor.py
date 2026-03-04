@@ -4,6 +4,7 @@ Handles MCP tool execution, result parsing, and error handling.
 """
 
 import logging
+import time
 from typing import Any, Dict, Optional, List
 from datetime import datetime
 
@@ -64,29 +65,57 @@ class ToolExecutor:
         """
         tool = self.find_tool(tool_name)
         if not tool:
+            logger.warning(
+                f"Tool not found: {tool_name}",
+                extra={"agent": "ToolExecutor", "event": "tool_not_found", "tool": tool_name},
+            )
             raise ToolExecutionError(f"Tool not found: {tool_name}")
-        
-        logger.info(f"Executing tool: {tool_name}")
-        logger.debug(f"Tool arguments: {tool_args}")
-        
+
+        t0 = time.monotonic()
+        logger.debug(
+            f"Calling MCP tool: {tool_name}",
+            extra={"agent": "ToolExecutor", "event": "tool_call", "tool": tool_name},
+        )
+
         try:
             # Execute the tool using BeeAI's MCPTool interface
             # MCPTool.run() returns JSONToolOutput with .result attribute
             result_output = await tool.run(input=tool_args)
-            
+
             # Get result - it's already a dict if it's JSON, or a string otherwise
             import json
             if isinstance(result_output.result, str):
                 result = json.loads(result_output.result)
             else:
                 result = result_output.result
-            
-            logger.info(f"Tool {tool_name} executed successfully")
+
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            success = result.get("ok", result.get("success", True))
+            logger.info(
+                f"Tool {tool_name} completed in {duration_ms}ms",
+                extra={
+                    "agent": "ToolExecutor",
+                    "event": "tool_result",
+                    "tool": tool_name,
+                    "duration_ms": duration_ms,
+                    "success": bool(success),
+                },
+            )
             return result
-            
+
         except Exception as e:
+            duration_ms = int((time.monotonic() - t0) * 1000)
             error_msg = f"Tool execution failed: {tool_name} - {str(e)}"
-            logger.error(error_msg, exc_info=True)
+            logger.error(
+                error_msg,
+                exc_info=True,
+                extra={
+                    "agent": "ToolExecutor",
+                    "event": "tool_error",
+                    "tool": tool_name,
+                    "duration_ms": duration_ms,
+                },
+            )
             raise ToolExecutionError(error_msg) from e
     
     async def execute_with_retry(
@@ -107,21 +136,49 @@ class ToolExecutor:
             ToolExecutionError: If all retry attempts fail
         """
         import asyncio
-        
+
         last_error = None
         for attempt in range(self.max_retries):
             try:
                 if attempt > 0:
                     wait_time = 2 ** (attempt - 1)
-                    logger.info(f"Retry attempt {attempt} after {wait_time}s")
+                    logger.warning(
+                        f"Retrying {tool_name} (attempt {attempt + 1}/{self.max_retries}) "
+                        f"after {wait_time}s",
+                        extra={
+                            "agent": "ToolExecutor",
+                            "event": "tool_retry",
+                            "tool": tool_name,
+                            "attempt": attempt + 1,
+                            "max_retries": self.max_retries,
+                            "wait_seconds": wait_time,
+                        },
+                    )
                     await asyncio.sleep(wait_time)
-                
+
                 return await self.execute_tool(tool_name, tool_args)
-                
+
             except ToolExecutionError as e:
                 last_error = e
-                logger.warning(f"Attempt {attempt + 1} failed: {e}")
-        
+                logger.warning(
+                    f"Attempt {attempt + 1} failed for {tool_name}: {e}",
+                    extra={
+                        "agent": "ToolExecutor",
+                        "event": "tool_attempt_failed",
+                        "tool": tool_name,
+                        "attempt": attempt + 1,
+                    },
+                )
+
+        logger.error(
+            f"Tool {tool_name} failed after {self.max_retries} attempts",
+            extra={
+                "agent": "ToolExecutor",
+                "event": "tool_exhausted",
+                "tool": tool_name,
+                "attempts": self.max_retries,
+            },
+        )
         raise ToolExecutionError(
             f"Tool execution failed after {self.max_retries} attempts: {last_error}"
         )

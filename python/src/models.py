@@ -350,4 +350,155 @@ class Action(BaseModel):
 
 
 
+# ── Fleet Validation Models (IMP-3) ──────────────────────────────────────────
+
+class FleetTargetStatus(str, Enum):
+    """Per-target execution status in a fleet run."""
+    PENDING   = "pending"
+    RUNNING   = "running"
+    DONE      = "done"
+    FAILED    = "failed"
+    SKIPPED   = "skipped"
+
+
+class FleetTarget(BaseModel):
+    """
+    A single target inside a fleet manifest.
+
+    Minimal required fields: ``host`` (IP or hostname).
+    All other fields are optional — the agent discovers workloads via SSH.
+
+    Example fleet.json entry::
+
+        {
+          "host": "192.168.1.100",
+          "label": "prod-web-01",
+          "credential_id": "vm-prod",
+          "tags": ["web", "production"]
+        }
+    """
+    host: str = Field(..., description="IP address or hostname")
+    label: Optional[str] = Field(None, description="Human-readable label (defaults to host)")
+    credential_id: Optional[str] = Field(
+        None,
+        description="Credential ID from secrets.json; resolved by hostname if omitted"
+    )
+    ssh_port: int = Field(22, description="SSH port")
+    tags: List[str] = Field(default_factory=list, description="Arbitrary tags for grouping/filtering")
+    enabled: bool = Field(True, description="Set to false to skip this target")
+    email_report_to: Optional[str] = Field(None, description="Per-target email override")
+
+    @property
+    def display_name(self) -> str:
+        """Return label if set, otherwise host."""
+        return self.label or self.host
+
+
+class FleetManifest(BaseModel):
+    """
+    Fleet manifest — a list of targets to validate in one run.
+
+    Loaded from ``config/fleet.json`` or built programmatically.
+
+    Example::
+
+        {
+          "name": "Production Fleet",
+          "max_parallel": 3,
+          "email_report_to": "ops@example.com",
+          "targets": [
+            { "host": "192.168.1.100", "label": "web-01", "credential_id": "vm-prod" },
+            { "host": "192.168.1.101", "label": "db-01",  "credential_id": "oracle-prod" }
+          ]
+        }
+    """
+    name: str = Field("Fleet Validation", description="Human-readable fleet name")
+    max_parallel: int = Field(
+        3,
+        ge=1, le=20,
+        description="Maximum number of targets validated concurrently"
+    )
+    email_report_to: Optional[str] = Field(
+        None,
+        description="Fleet-level email recipient (per-target overrides take precedence)"
+    )
+    targets: List[FleetTarget] = Field(..., min_length=1, description="Targets to validate")
+
+    @property
+    def enabled_targets(self) -> List[FleetTarget]:
+        """Return only enabled targets."""
+        return [t for t in self.targets if t.enabled]
+
+
+class FleetTargetResult(BaseModel):
+    """Validation outcome for a single target inside a fleet run."""
+    target: FleetTarget
+    status: FleetTargetStatus
+    score: Optional[int] = Field(None, ge=0, le=100)
+    workflow_status: Optional[str] = None   # "success" | "partial_success" | "failure"
+    passed_checks: int = 0
+    failed_checks: int = 0
+    warning_checks: int = 0
+    execution_time_seconds: float = 0.0
+    error_message: Optional[str] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+    @property
+    def display_status(self) -> str:
+        """Emoji + status string for console display."""
+        return {
+            FleetTargetStatus.PENDING:  "⏳ pending",
+            FleetTargetStatus.RUNNING:  "🔄 running",
+            FleetTargetStatus.DONE:     "✅ done",
+            FleetTargetStatus.FAILED:   "❌ failed",
+            FleetTargetStatus.SKIPPED:  "⏭  skipped",
+        }.get(self.status, self.status.value)
+
+
+class FleetReport(BaseModel):
+    """
+    Aggregated report for a complete fleet validation run.
+
+    Produced by ``FleetOrchestrator.run_fleet()`` and displayed by
+    ``BeeAIInteractiveCLI``.
+    """
+    fleet_name: str
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    finished_at: Optional[datetime] = None
+    total_targets: int
+    completed: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    skipped: int = 0
+    results: List[FleetTargetResult] = Field(default_factory=list)
+    execution_time_seconds: float = 0.0
+
+    @property
+    def overall_status(self) -> str:
+        """Fleet-level status string."""
+        if self.failed == 0 and self.completed > 0:
+            return "success"
+        if self.succeeded > 0:
+            return "partial_success"
+        return "failure"
+
+    @property
+    def average_score(self) -> Optional[float]:
+        """Average score across completed targets (None if no scores)."""
+        scores = [r.score for r in self.results if r.score is not None]
+        return sum(scores) / len(scores) if scores else None
+
+    def to_summary(self) -> str:
+        """One-line summary string."""
+        avg = f"{self.average_score:.0f}/100" if self.average_score is not None else "n/a"
+        return (
+            f"Fleet '{self.fleet_name}': "
+            f"{self.succeeded}/{self.total_targets} passed, "
+            f"{self.failed} failed, "
+            f"avg score {avg}, "
+            f"{self.execution_time_seconds:.1f}s"
+        )
+
+
 # Made with Bob

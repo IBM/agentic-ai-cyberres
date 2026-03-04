@@ -2,204 +2,220 @@
 # Copyright contributors to the agentic-ai-cyberres project
 #
 """
-Agent Logger - Structured dual-stream logging for BeeAI validation agents.
+Agent logging for BeeAI recovery-validation workflow.
 
 Provides:
-- Console stream: Clean, human-readable agent activity (what the user sees)
-- File stream: Full structured logs with timestamps, levels, context (system logs)
-- AgentTracker: Tracks which agent is active and what decisions it's making
-- Decision logging: Records agent reasoning and tool calls
+  setup_logging()          — configure dual-stream logging (console + JSON file)
+  AgentTracker             — emit structured console + log events for one agent role
+  WorkflowProgressDisplay  — live phase-progress table for a single VM workflow
 
-Usage:
-    from agent_logging.agent_logger import setup_logging, get_agent_logger, AgentTracker
+Console output (INFO):
+  Clean agent role banners with icons, decisions, and warnings.
+  No raw stack traces, no SSH/MCP internals.
 
-    # Setup once at startup
-    setup_logging(log_dir="logs", log_level="DEBUG")
+Log file output (DEBUG, JSON lines):
+  Every tool call, result, retry, decision, and phase transition.
+  Passwords are redacted by SensitiveDataFilter.
 
-    # In each agent
-    logger = get_agent_logger("DiscoveryAgent")
-    tracker = AgentTracker("DiscoveryAgent")
+Usage::
 
-    with tracker.phase("port_scan"):
-        tracker.decision("Scanning ports 22, 80, 443, 1521, 27017")
-        tracker.tool_call("scan_ports", {"host": "192.168.1.100"})
-        tracker.tool_result("scan_ports", {"open_ports": [22, 80]})
+    from agent_logging.agent_logger import setup_logging, AgentTracker, WorkflowProgressDisplay
+
+    log_file = setup_logging(log_dir="logs", log_level="DEBUG", console_level="INFO",
+                             log_file_prefix="beeai", suppress_noisy_loggers=True)
+
+    tracker = AgentTracker("DiscoveryAgent", resource="192.168.1.100")
+    tracker.start("Scanning workloads")
+    with tracker.phase("discovery", "Port scanning"):
+        ...
+    tracker.thinking("Found 3 open ports — checking for MongoDB...")
+    tracker.decision("Detected MongoDB on port 27017", confidence=0.9)
+    tracker.finish("Discovery complete")
+
+    progress = WorkflowProgressDisplay("192.168.1.100")
+    progress.start_workflow()
+    progress.update_phase("discovery", "running", "Scanning ports...")
+    progress.update_phase("discovery", "done", "4.2s")
+    progress.finish_workflow(status="success", score=85, elapsed=12.3)
 """
 
 import json
 import logging
+import logging.handlers
 import os
+import re
 import sys
-import time
+import traceback
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, Optional
 
 
-# ─────────────────────────────────────────────
-# ANSI colour codes for console output
-# ─────────────────────────────────────────────
-class Colours:
-    RESET   = "\033[0m"
-    BOLD    = "\033[1m"
-    DIM     = "\033[2m"
+# ── ANSI colour helpers ───────────────────────────────────────────────────────
 
-    # Agents
-    BLUE    = "\033[34m"
-    CYAN    = "\033[36m"
-    GREEN   = "\033[32m"
-    YELLOW  = "\033[33m"
-    RED     = "\033[31m"
-    MAGENTA = "\033[35m"
-    WHITE   = "\033[37m"
+_RESET  = "\033[0m"
+_BOLD   = "\033[1m"
+_DIM    = "\033[2m"
+_GREEN  = "\033[32m"
+_YELLOW = "\033[33m"
+_RED    = "\033[31m"
+_CYAN   = "\033[36m"
+_WHITE  = "\033[37m"
+_GREY   = "\033[90m"
 
-    # Backgrounds
-    BG_BLUE  = "\033[44m"
-    BG_GREEN = "\033[42m"
-    BG_RED   = "\033[41m"
-
-    @staticmethod
-    def strip(text: str) -> str:
-        """Remove ANSI codes from text."""
-        import re
-        return re.sub(r'\033\[[0-9;]*m', '', text)
+def _c(text: str, *codes: str) -> str:
+    """Wrap text in ANSI codes (no-op if stdout is not a tty)."""
+    if not sys.stdout.isatty():
+        return text
+    return "".join(codes) + text + _RESET
 
 
-# Agent colour map – each agent gets a distinct colour
-AGENT_COLOURS = {
-    "Orchestrator":      Colours.MAGENTA,
-    "DiscoveryAgent":    Colours.CYAN,
-    "ValidationAgent":   Colours.BLUE,
-    "EvaluationAgent":   Colours.GREEN,
-    "BatchOrchestrator": Colours.YELLOW,
-    "CredentialResolver": Colours.WHITE,
-    "default":           Colours.WHITE,
+# ── Agent role registry ───────────────────────────────────────────────────────
+
+AGENT_ROLES: Dict[str, tuple[str, str]] = {
+    "discovery":    ("🔍", "Discovery Agent"),
+    "planning":     ("📋", "Planning Agent"),
+    "validation":   ("⚙️ ", "Validation Agent"),
+    "evaluation":   ("🧠", "Evaluation Agent"),
+    "credentials":  ("🔑", "Credential Resolver"),
+    "orchestrator": ("🤖", "Orchestrator"),
+    "system":       ("⚙️ ", "System"),
+    "fleet":        ("🐝", "Fleet Orchestrator"),
 }
 
-# Phase icons
-PHASE_ICONS = {
-    "discovery":   "🔍",
-    "planning":    "📋",
-    "validation":  "✅",
-    "evaluation":  "🎯",
-    "reporting":   "📊",
-    "credentials": "🔑",
-    "batch":       "⚡",
-    "cleanup":     "🧹",
-    "default":     "▶",
-}
-
-# Status icons
-STATUS_ICONS = {
-    "start":    "▶",
-    "success":  "✅",
-    "warning":  "⚠️ ",
-    "error":    "❌",
-    "info":     "ℹ️ ",
-    "decision": "💭",
-    "tool":     "🔧",
-    "result":   "📤",
-    "skip":     "⏭️ ",
-    "llm":      "🤖",
-    "det":      "⚙️ ",
-    "thinking": "💭",
-    "step":     "→",
-}
-
-# Agent role names shown in console output (no implementation details exposed)
-AGENT_ROLES = {
-    "discovery":   ("🔍", "Discovery Agent"),
-    "planning":    ("📋", "Planning Agent"),
-    "validation":  ("✅", "Validation Agent"),
-    "evaluation":  ("🎯", "Evaluation Agent"),
-    "reporting":   ("📊", "Reporting Agent"),
-    "credentials": ("🔑", "Credential Agent"),
-    "batch":       ("⚡", "Batch Agent"),
-}
+def _role_display(agent_name: str) -> tuple[str, str]:
+    """Return (icon, display_name) for an agent name."""
+    key = agent_name.lower().replace(" ", "").replace("agent", "")
+    for k, v in AGENT_ROLES.items():
+        if k in key or key in k:
+            return v
+    return ("🤖", agent_name)
 
 
-# ─────────────────────────────────────────────
-# Console formatter – clean, coloured output
-# ─────────────────────────────────────────────
+# ── SensitiveDataFilter ───────────────────────────────────────────────────────
+
+class SensitiveDataFilter(logging.Filter):
+    """
+    Redact passwords, tokens, and API keys from log records.
+
+    Mirrors the filter already applied in cyberres-mcp/server.py so that
+    agent-side logs are equally safe.
+    """
+
+    _sensitive_key_re = re.compile(
+        r"(pass(word)?|token|secret|key|authorization|auth|pwd|api_key)",
+        re.IGNORECASE,
+    )
+    _uri_creds_re = re.compile(r"(://[^/\s:@]+:)([^@\s]+)(@)")
+
+    # Reserved LogRecord attributes that must never be overwritten.
+    # Python 3.12+ raises ValueError: "Attempt to overwrite '<attr>' in LogRecord"
+    # if you assign to these via record.__dict__[k].
+    _LOGRECORD_RESERVED = frozenset({
+        "name", "msg", "args", "levelname", "levelno", "pathname",
+        "filename", "module", "exc_info", "exc_text", "stack_info",
+        "lineno", "funcName", "created", "msecs", "relativeCreated",
+        "thread", "threadName", "processName", "process", "taskName",
+        "message",
+    })
+
+    def _scrub(self, value: str) -> str:
+        masked = self._uri_creds_re.sub(r"\1***\3", value)
+        masked = re.sub(r"([A-Za-z0-9_-]{24,})", "***", masked)
+        return masked
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Scrub the message string directly (safe — msg is a plain attribute).
+        if isinstance(record.msg, str):
+            record.msg = self._scrub(record.msg)
+
+        # Only touch user-supplied extra fields; never touch reserved LogRecord
+        # attributes (Python 3.12+ raises ValueError if you try).
+        for k, v in list(record.__dict__.items()):
+            if k in self._LOGRECORD_RESERVED or k.startswith("_"):
+                continue
+            if isinstance(v, str):
+                if self._sensitive_key_re.search(k):
+                    record.__dict__[k] = "***"
+                else:
+                    record.__dict__[k] = self._scrub(v)
+            elif isinstance(v, dict):
+                safe: Dict[str, Any] = {}
+                for dk, dv in v.items():
+                    if self._sensitive_key_re.search(str(dk)):
+                        safe[dk] = "***"
+                    elif isinstance(dv, str):
+                        safe[dk] = self._scrub(dv)
+                    else:
+                        safe[dk] = dv
+                record.__dict__[k] = safe
+        return True
+
+
+# ── JSON log formatter ────────────────────────────────────────────────────────
+
+class JsonLineFormatter(logging.Formatter):
+    """
+    Format each log record as a single JSON line.
+
+    Fields emitted:
+      ts, level, logger, agent, phase, event, host, message, + any extras
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        doc: Dict[str, Any] = {
+            "ts":      datetime.now(timezone.utc).isoformat(),
+            "level":   record.levelname,
+            "logger":  record.name,
+            "agent":   getattr(record, "agent", ""),
+            "phase":   getattr(record, "phase", ""),
+            "event":   getattr(record, "event", ""),
+            "host":    getattr(record, "host", ""),
+            "message": record.getMessage(),
+        }
+        # Include any extra structured fields attached by the caller
+        _skip = {
+            "name", "msg", "args", "levelname", "levelno", "pathname",
+            "filename", "module", "exc_info", "exc_text", "stack_info",
+            "lineno", "funcName", "created", "msecs", "relativeCreated",
+            "thread", "threadName", "processName", "process", "message",
+            "agent", "phase", "event", "host",
+        }
+        for k, v in record.__dict__.items():
+            if k not in _skip and not k.startswith("_"):
+                doc[k] = v
+        if record.exc_info:
+            doc["exception"] = self.formatException(record.exc_info)
+        return json.dumps(doc, default=str)
+
+
+# ── Console formatter ─────────────────────────────────────────────────────────
+
 class ConsoleFormatter(logging.Formatter):
     """
     Human-readable console formatter.
 
-    Shows:  [AGENT] icon  message
-    Hides:  timestamps, module paths, stack traces (those go to file)
+    Shows:  [HH:MM:SS]  LEVEL  message
+    Hides:  logger name, agent internals (those go to the JSON file)
     """
 
-    LEVEL_STYLES = {
-        logging.DEBUG:    (Colours.DIM,    ""),
-        logging.INFO:     (Colours.RESET,  ""),
-        logging.WARNING:  (Colours.YELLOW, "⚠️  "),
-        logging.ERROR:    (Colours.RED,    "❌ "),
-        logging.CRITICAL: (Colours.RED + Colours.BOLD, "🔴 "),
+    _LEVEL_COLOURS = {
+        "DEBUG":    _GREY,
+        "INFO":     _WHITE,
+        "WARNING":  _YELLOW,
+        "ERROR":    _RED,
+        "CRITICAL": _RED + _BOLD,
     }
 
     def format(self, record: logging.LogRecord) -> str:
-        colour, prefix = self.LEVEL_STYLES.get(record.levelno, (Colours.RESET, ""))
-
-        # Agent tag
-        agent = getattr(record, "agent", None)
-        if agent:
-            agent_colour = AGENT_COLOURS.get(agent, AGENT_COLOURS["default"])
-            agent_tag = f"{agent_colour}[{agent}]{Colours.RESET} "
-        else:
-            agent_tag = ""
-
-        # Phase tag
-        phase = getattr(record, "phase", None)
-        if phase:
-            icon = PHASE_ICONS.get(phase, PHASE_ICONS["default"])
-            phase_tag = f"{Colours.DIM}{icon} {phase}{Colours.RESET}  "
-        else:
-            phase_tag = ""
-
-        msg = record.getMessage()
-        return f"{agent_tag}{phase_tag}{colour}{prefix}{msg}{Colours.RESET}"
+        ts = datetime.now().strftime("%H:%M:%S")
+        colour = self._LEVEL_COLOURS.get(record.levelname, _WHITE)
+        level_tag = f"{colour}{record.levelname:<8}{_RESET}" if sys.stdout.isatty() else record.levelname
+        return f"  {_c(ts, _GREY)}  {level_tag}  {record.getMessage()}"
 
 
-# ─────────────────────────────────────────────
-# File formatter – structured JSON lines
-# ─────────────────────────────────────────────
-class FileFormatter(logging.Formatter):
-    """
-    Structured JSON-lines formatter for log files.
-
-    Each line is a valid JSON object with full context.
-    """
-
-    def format(self, record: logging.LogRecord) -> str:
-        entry = {
-            "ts":      datetime.utcnow().isoformat() + "Z",
-            "level":   record.levelname,
-            "logger":  record.name,
-            "msg":     record.getMessage(),
-            "module":  record.module,
-            "line":    record.lineno,
-        }
-
-        # Add extra fields from LogRecord
-        for field in ("agent", "phase", "tool", "decision", "resource", "batch_id"):
-            val = getattr(record, field, None)
-            if val is not None:
-                entry[field] = val
-
-        # Add exception info
-        if record.exc_info:
-            entry["exception"] = self.formatException(record.exc_info)
-
-        return json.dumps(entry, default=str)
-
-
-# ─────────────────────────────────────────────
-# Global setup
-# ─────────────────────────────────────────────
-_logging_configured = False
-_log_file_path: Optional[Path] = None
-
+# ── setup_logging ─────────────────────────────────────────────────────────────
 
 def setup_logging(
     log_dir: str = "logs",
@@ -207,297 +223,191 @@ def setup_logging(
     console_level: str = "INFO",
     log_file_prefix: str = "beeai",
     suppress_noisy_loggers: bool = True,
-) -> Path:
+) -> str:
     """
-    Configure dual-stream logging: console (clean) + file (structured JSON).
+    Configure dual-stream logging for the BeeAI agent.
+
+    - Console handler: ``console_level`` (default INFO), human-readable
+    - File handler:    ``log_level`` (default DEBUG), JSON lines
 
     Args:
-        log_dir: Directory for log files
-        log_level: File log level (DEBUG, INFO, WARNING, ERROR)
-        console_level: Console log level (INFO recommended)
-        log_file_prefix: Prefix for log file names
-        suppress_noisy_loggers: Suppress MCP/paramiko/httpx noise on console
+        log_dir:               Directory for log files (created if absent)
+        log_level:             Minimum level written to the log file
+        console_level:         Minimum level written to the console
+        log_file_prefix:       Prefix for the log file name
+        suppress_noisy_loggers: Silence paramiko, mcp.*, asyncio, urllib3
 
     Returns:
-        Path to the log file
+        Absolute path to the log file created.
     """
-    global _logging_configured, _log_file_path
-
-    if _logging_configured:
-        return _log_file_path  # type: ignore[return-value]
-
-    # Create log directory
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
 
-    # Log file with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = log_path / f"{log_file_prefix}_{timestamp}.log"
-    _log_file_path = log_file
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_file = log_path / f"{log_file_prefix}-{timestamp}.log"
 
-    # ── Root logger ──────────────────────────────────────────────────────────
     root = logging.getLogger()
-    root.setLevel(logging.DEBUG)  # Capture everything; handlers filter
+    root.setLevel(logging.DEBUG)  # root captures everything; handlers filter
 
-    # Remove any existing handlers
-    root.handlers.clear()
+    # Remove any handlers added by earlier basicConfig calls
+    for h in list(root.handlers):
+        root.removeHandler(h)
 
-    # ── File handler (JSON lines, full detail) ───────────────────────────────
-    fh = logging.FileHandler(log_file, encoding="utf-8")
+    # ── File handler (JSON lines, DEBUG, rotating 10 MB × 5 files) ───────────
+    fh = logging.handlers.RotatingFileHandler(
+        log_file,
+        maxBytes=10 * 1024 * 1024,   # 10 MB per file
+        backupCount=5,                # keep 5 rotated files
+        encoding="utf-8",
+    )
     fh.setLevel(getattr(logging, log_level.upper(), logging.DEBUG))
-    fh.setFormatter(FileFormatter())
+    fh.setFormatter(JsonLineFormatter())
+    fh.addFilter(SensitiveDataFilter())
     root.addHandler(fh)
 
-    # ── Console handler (clean, coloured) ────────────────────────────────────
+    # ── Console handler (human-readable, INFO) ────────────────────────────────
     ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(getattr(logging, console_level.upper(), logging.INFO))
     ch.setFormatter(ConsoleFormatter())
+    ch.addFilter(SensitiveDataFilter())
     root.addHandler(ch)
 
-    # ── Suppress noisy third-party loggers on console ────────────────────────
-    # Strategy: set propagate=False so they DON'T reach the root console handler.
-    # Add a dedicated file-only handler so their logs still go to the log file.
+    # ── Suppress noisy third-party loggers ────────────────────────────────────
     if suppress_noisy_loggers:
-        noisy = [
-            "mcp", "mcp.server", "mcp.server.lowlevel", "mcp.server.lowlevel.server",
-            "paramiko", "paramiko.transport",
-            "httpx", "httpcore", "urllib3",
+        for noisy in (
+            "paramiko",
+            "paramiko.transport",
+            "mcp",
+            "mcp.client",
+            "mcp.server",
             "asyncio",
-        ]
-        for name in noisy:
-            lg = logging.getLogger(name)
-            lg.setLevel(logging.DEBUG)
-            # File-only handler — full detail goes to log file
-            noisy_fh = logging.FileHandler(log_file, encoding="utf-8")
-            noisy_fh.setLevel(logging.DEBUG)
-            noisy_fh.setFormatter(FileFormatter())
-            lg.addHandler(noisy_fh)
-            # CRITICAL: don't propagate to root (which has the console handler)
-            lg.propagate = False
+            "urllib3",
+            "urllib3.connectionpool",
+            "httpx",
+            "httpcore",
+            "beeai_framework",
+        ):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    _logging_configured = True
-
-    # First log entry
-    startup_logger = logging.getLogger("startup")
-    startup_logger.info(
-        f"Logging initialised — file: {log_file}",
-        extra={"agent": "System"}
-    )
-
-    return log_file
+    return str(log_file.resolve())
 
 
-def get_agent_logger(agent_name: str) -> logging.Logger:
-    """
-    Get a logger pre-configured for a specific agent.
+# ── AgentTracker ──────────────────────────────────────────────────────────────
 
-    Args:
-        agent_name: Name of the agent (e.g. "DiscoveryAgent")
-
-    Returns:
-        Logger with agent context
-    """
-    return logging.getLogger(f"agents.{agent_name}")
-
-
-def get_log_file() -> Optional[Path]:
-    """Return the current log file path."""
-    return _log_file_path
-
-
-# ─────────────────────────────────────────────
-# AgentTracker – tracks agent decisions
-# ─────────────────────────────────────────────
 class AgentTracker:
     """
-    Tracks agent activity with a modern "thinking steps" display style.
+    Emit structured console + log events for one agent role.
 
-    Inspired by ChatGPT / Claude agent UIs:
-    - Phase headers show which agent is active and what mode (LLM vs rule-based)
-    - Tool calls shown as "Using: <tool>" with masked args
-    - Results shown inline with ✅/⚠️/❌ and a one-line summary
-    - Step numbers show progress through the plan
-    - Thinking/reasoning shown as indented italic-style text
+    Each method prints a clean line to the console (at INFO) and emits a
+    structured JSON record to the log file (at DEBUG or INFO).
 
-    Console output is clean and human-readable.
-    File output is structured JSON for analysis.
+    Args:
+        agent_name: Role name, e.g. "DiscoveryAgent", "Orchestrator"
+        resource:   Optional target host/resource label shown in output
+
+    Example::
+
+        tracker = AgentTracker("DiscoveryAgent", resource="192.168.1.100")
+        tracker.start("Scanning workloads")
+        with tracker.phase("discovery", "Port scanning"):
+            ...
+        tracker.thinking("Found MongoDB on port 27017")
+        tracker.decision("Detected MongoDB", confidence=0.9)
+        tracker.finish("Discovery complete")
     """
 
-    # Width of the separator line
-    _WIDTH = 60
+    def __init__(self, agent_name: str, resource: str = ""):
+        self._name = agent_name
+        self._resource = resource
+        self._icon, self._display = _role_display(agent_name)
+        self._logger = logging.getLogger(f"agent.{agent_name.lower()}")
 
-    def __init__(self, agent_name: str, resource: Optional[str] = None):
-        self.agent_name = agent_name
-        self.resource = resource
-        self.logger = get_agent_logger(agent_name)
-        self._current_phase: Optional[str] = None
-        self._phase_start: float = 0.0
-        self._decisions: List[str] = []
-        self._tool_calls: List[Dict[str, Any]] = []
-        self._phase_stack: List[str] = []
+    # ── Banner helpers ────────────────────────────────────────────────────────
 
-    # ── internal helpers ──────────────────────────────────────────────────────
+    def _header(self) -> str:
+        res = f"  [{self._resource}]" if self._resource else ""
+        return _c(f"  {self._icon} {self._display}{res}", _BOLD)
 
-    def _extra(self, **kwargs) -> Dict[str, Any]:
-        extra: Dict[str, Any] = {"agent": self.agent_name}
-        if self._current_phase:
-            extra["phase"] = self._current_phase
-        if self.resource:
-            extra["resource"] = self.resource
-        extra.update(kwargs)
-        return extra
-
-    def _agent_badge(self, phase: Optional[str] = None) -> str:
-        """Return a coloured agent badge, optionally with phase role tag."""
-        colour = AGENT_COLOURS.get(self.agent_name, AGENT_COLOURS["default"])
-        badge = f"{colour}{Colours.BOLD}[{self.agent_name}]{Colours.RESET}"
-        if phase and phase in AGENT_ROLES:
-            icon, role = AGENT_ROLES[phase]
-            badge += f" {Colours.DIM}{icon} {role}{Colours.RESET}"
-        return badge
-
-    # ── public API ────────────────────────────────────────────────────────────
-
-    def start(self, message: str = ""):
-        """Print a workflow start banner."""
-        msg = message or f"Starting {self.agent_name}"
-        resource_str = f"  📍 {self.resource}" if self.resource else ""
-        self.logger.info(
-            f"\n{'═' * self._WIDTH}\n"
-            f"  {self._agent_badge()}\n"
-            f"  {msg}"
-            f"{resource_str}\n"
-            f"{'─' * self._WIDTH}",
-            extra=self._extra()
+    def _log(
+        self,
+        level: int,
+        message: str,
+        event: str = "",
+        phase: str = "",
+        **extra: Any,
+    ) -> None:
+        self._logger.log(
+            level,
+            message,
+            extra={
+                "agent": self._name,
+                "host":  self._resource,
+                "event": event,
+                "phase": phase,
+                **extra,
+            },
         )
 
-    def finish(self, message: str = "", success: bool = True):
-        """Print a workflow completion line."""
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def start(self, message: str) -> None:
+        """Print agent banner and log workflow start."""
+        print(f"\n{self._header()}")
+        self._log(logging.INFO, message, event="start")
+
+    def finish(self, message: str, success: bool = True) -> None:
+        """Log workflow completion."""
         icon = "✅" if success else "❌"
-        msg = message or f"{self.agent_name} complete"
-        self.logger.info(
-            f"{'─' * self._WIDTH}\n"
-            f"  {icon} {msg}\n"
-            f"{'═' * self._WIDTH}",
-            extra=self._extra()
+        print(f"     {icon} {message}")
+        self._log(logging.INFO, message, event="finish", success=success)
+
+    def info(self, message: str, phase: str = "") -> None:
+        """Log an informational message."""
+        print(f"     ℹ️  {message}")
+        self._log(logging.INFO, message, event="info", phase=phase)
+
+    def thinking(self, message: str, phase: str = "") -> None:
+        """Log an agent reasoning step (shown dimmed on console)."""
+        print(f"     {_c('💭 ' + message, _DIM)}")
+        self._log(logging.DEBUG, message, event="thinking", phase=phase)
+
+    def decision(self, message: str, confidence: float = 1.0, phase: str = "") -> None:
+        """Log a decision or conclusion."""
+        print(f"     ✅ {message}")
+        self._log(
+            logging.INFO, message, event="decision",
+            phase=phase, confidence=confidence,
         )
 
-    @contextmanager
-    def phase(self, phase_name: str, description: str = ""):
-        """Context manager for a named workflow phase."""
-        self._phase_stack.append(phase_name)
-        self._current_phase = phase_name
-        self._phase_start = time.time()
+    def warning(self, message: str, phase: str = "") -> None:
+        """Log a warning."""
+        print(f"     {_c('⚠️  ' + message, _YELLOW)}")
+        self._log(logging.WARNING, message, event="warning", phase=phase)
 
-        icon = PHASE_ICONS.get(phase_name, PHASE_ICONS["default"])
-        desc = f"  {Colours.DIM}{description}{Colours.RESET}" if description else ""
-        self.logger.info(
-            f"\n  {icon} {Colours.BOLD}{phase_name.upper()}{Colours.RESET}{desc}",
-            extra=self._extra()
-        )
-
-        try:
-            yield self
-            elapsed = time.time() - self._phase_start
-            self.logger.info(
-                f"  {'─'*40}  ✅ done ({elapsed:.1f}s)",
-                extra=self._extra()
-            )
-        except Exception as e:
-            elapsed = time.time() - self._phase_start
-            self.logger.error(
-                f"  {'─'*40}  ❌ failed ({elapsed:.1f}s): {e}",
-                extra=self._extra()
-            )
-            raise
-        finally:
-            self._phase_stack.pop()
-            self._current_phase = self._phase_stack[-1] if self._phase_stack else None
-
-    def mode(self, phase: str, description: str = ""):
-        """
-        Print a clean agent-role banner at the start of each phase.
-
-        Shows the agent's role and what it's doing — no implementation details.
-        Inspired by how ChatGPT/Claude show agent steps without exposing internals.
-
-        Args:
-            phase: Phase key (e.g. "discovery", "planning", "validation", "evaluation")
-            description: One-line description of what this phase does
-        """
-        if phase in AGENT_ROLES:
-            icon, role = AGENT_ROLES[phase]
-            badge = f"{Colours.CYAN}{icon}  {Colours.BOLD}{role}{Colours.RESET}"
+    def error(self, message: str, exc: Optional[Exception] = None, phase: str = "") -> None:
+        """Log an error, optionally with exception details."""
+        print(f"     {_c('❌ ' + message, _RED)}")
+        if exc and logging.getLogger().isEnabledFor(logging.DEBUG):
+            tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            self._log(logging.ERROR, message, event="error", phase=phase, traceback=tb)
         else:
-            badge = f"{Colours.CYAN}▶  {Colours.BOLD}{phase.capitalize()}{Colours.RESET}"
+            self._log(logging.ERROR, message, event="error", phase=phase)
 
-        desc_line = (
-            f"\n     {Colours.DIM}↳ {description}{Colours.RESET}"
-            if description else ""
-        )
-        self.logger.info(
-            f"\n  ┌─ {badge}{desc_line}\n  └{'─'*50}",
-            extra=self._extra(decision=f"phase={phase}")
-        )
-
-    def thinking(self, thought: str):
-        """
-        Show an LLM 'thinking' step — displayed like ChatGPT's reasoning bubble.
-
-        Args:
-            thought: What the LLM is considering
-        """
-        self.logger.info(
-            f"  {Colours.DIM}💭 Thinking: {thought}{Colours.RESET}",
-            extra=self._extra(decision=thought)
-        )
-
-    def decision(self, reasoning: str, confidence: Optional[float] = None):
-        """
-        Log an agent decision — shown as an indented conclusion after thinking.
-
-        Args:
-            reasoning: What the agent decided
-            confidence: Optional confidence level (0.0-1.0)
-        """
-        self._decisions.append(reasoning)
-        conf_str = (
-            f"  {Colours.DIM}({confidence:.0%} confidence){Colours.RESET}"
-            if confidence is not None else ""
-        )
-        self.logger.info(
-            f"  {Colours.GREEN}✓{Colours.RESET} {reasoning}{conf_str}",
-            extra=self._extra(decision=reasoning)
-        )
-
-    def tool_call(self, tool_name: str, args: Dict[str, Any]):
-        """
-        Show a tool invocation in the style of modern agent UIs:
-          > Using: db_mongo_ssh_ping  host=9.11.68.67  user=vikas
-
-        Args:
-            tool_name: MCP tool name
-            args: Tool arguments (passwords masked)
-        """
-        safe_args = self._mask_sensitive(args)
-        self._tool_calls.append({"tool": tool_name, "args": safe_args})
-
-        # Build a compact one-line arg summary (key=value, skip None)
-        arg_parts = [
-            f"{k}={v}" for k, v in safe_args.items()
-            if v is not None and k not in ("ssh_key_path",)
-        ]
-        arg_str = "  " + "  ".join(arg_parts[:4]) if arg_parts else ""
-
-        self.logger.info(
-            f"  {Colours.CYAN}▶ Using:{Colours.RESET} "
-            f"{Colours.BOLD}{tool_name}{Colours.RESET}"
-            f"{Colours.DIM}{arg_str}{Colours.RESET}",
-            extra=self._extra(tool=tool_name)
-        )
-        self.logger.debug(
-            f"     Full args: {json.dumps(safe_args, default=str)}",
-            extra=self._extra(tool=tool_name)
+    def tool_call(
+        self,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        phase: str = "execution",
+    ) -> None:
+        """Log an MCP tool call (shown dimmed on console; args go to log file only)."""
+        print(f"     {_c('⚙️  ' + tool_name, _DIM)}")
+        self._log(
+            logging.DEBUG,
+            f"Tool call: {tool_name}",
+            event="tool_call",
+            phase=phase,
+            tool=tool_name,
+            tool_args=tool_args,   # renamed: 'args' is a reserved LogRecord attribute
         )
 
     def tool_result(
@@ -505,180 +415,165 @@ class AgentTracker:
         tool_name: str,
         result: Any,
         success: bool = True,
-        summary: Optional[str] = None,
-    ):
+        summary: str = "",
+        phase: str = "execution",
+    ) -> None:
+        """Log an MCP tool result with a one-line console summary."""
+        msg = summary or (f"✅ {tool_name}" if success else f"❌ {tool_name}")
+        print(f"     {msg}")
+        self._log(
+            logging.INFO if success else logging.WARNING,
+            summary or tool_name,
+            event="tool_result",
+            phase=phase,
+            tool=tool_name,
+            success=success,
+        )
+
+    def mode(self, phase: str, description: str = "") -> None:
         """
-        Show a tool result inline — right after the tool_call line.
+        Print a phase-change banner.
 
-        Format:
-          ✅  db_mongo_ssh_ping  →  MongoDB 7.0.1 reachable via ssh_mongo_shell
-          ❌  vm_linux_services  →  Required service(s) not running: mongod.service
-
-        Args:
-            tool_name: MCP tool name
-            result: Raw result dict
-            success: Whether the call succeeded
-            summary: Human-readable one-line summary (preferred over raw result)
+        Used by the orchestrator to announce which agent is now active.
         """
-        if success:
-            icon   = "✅"
-            colour = Colours.GREEN
+        icon, display = _role_display(phase)
+        res = f"  [{self._resource}]" if self._resource else ""
+        print(f"\n  {_c(icon + ' ' + display + res, _BOLD, _CYAN)}")
+        if description:
+            print(f"     {_c(description, _DIM)}")
+        self._log(logging.INFO, description or phase, event="phase_start", phase=phase)
+
+    @contextmanager
+    def phase(self, phase_name: str, description: str = "") -> Generator[None, None, None]:
+        """
+        Context manager that logs phase start and end.
+
+        Usage::
+
+            with tracker.phase("initialization", "Loading LLM and MCP tools"):
+                await orchestrator.initialize()
+        """
+        self._log(logging.INFO, description or phase_name, event="phase_start", phase=phase_name)
+        try:
+            yield
+        except Exception as exc:
+            self._log(
+                logging.ERROR,
+                f"Phase '{phase_name}' failed: {exc}",
+                event="phase_error",
+                phase=phase_name,
+            )
+            raise
         else:
-            icon   = "❌"
-            colour = Colours.RED
-
-        if summary:
-            # Strip leading check-number prefix if present (e.g. "[1/7] Name — ✅ PASS: ...")
-            # so we don't double-print the icon
-            display = summary
-        elif isinstance(result, dict):
-            keys = list(result.keys())[:3]
-            display = f"{{{', '.join(keys)}{'...' if len(result) > 3 else ''}}}"
-        elif isinstance(result, list):
-            display = f"[{len(result)} items]"
-        elif isinstance(result, str) and len(result) > 120:
-            display = result[:117] + "..."
-        else:
-            display = str(result)
-
-        self.logger.info(
-            f"  {colour}{icon}{Colours.RESET}  "
-            f"{Colours.DIM}{tool_name}{Colours.RESET}  "
-            f"{Colours.RESET}→  {display}",
-            extra=self._extra(tool=tool_name)
-        )
-        self.logger.debug(
-            f"     Full result: {json.dumps(result, default=str)[:500]}",
-            extra=self._extra(tool=tool_name)
-        )
-
-    def info(self, message: str):
-        """Log an informational message."""
-        self.logger.info(
-            f"  {Colours.DIM}ℹ  {message}{Colours.RESET}",
-            extra=self._extra()
-        )
-
-    def warning(self, message: str):
-        """Log a warning."""
-        self.logger.warning(
-            f"  ⚠️  {message}",
-            extra=self._extra()
-        )
-
-    def error(self, message: str, exc: Optional[Exception] = None):
-        """Log an error."""
-        self.logger.error(
-            f"  ❌ {message}",
-            extra=self._extra(),
-            exc_info=exc is not None
-        )
-
-    def skip(self, reason: str):
-        """Log a skipped step."""
-        self.logger.info(
-            f"  {Colours.DIM}⏭  Skipped: {reason}{Colours.RESET}",
-            extra=self._extra()
-        )
-
-    def summary(self) -> Dict[str, Any]:
-        """Return a summary of tracked activity."""
-        return {
-            "agent": self.agent_name,
-            "resource": self.resource,
-            "decisions_made": len(self._decisions),
-            "tool_calls": len(self._tool_calls),
-            "decisions": self._decisions,
-            "tools_used": [t["tool"] for t in self._tool_calls],
-        }
-
-    @staticmethod
-    def _mask_sensitive(data: Dict[str, Any]) -> Dict[str, Any]:
-        """Mask sensitive fields in a dictionary."""
-        SENSITIVE_KEYS = {
-            "password", "passwd", "secret", "token", "key",
-            "api_key", "private_key", "ssh_password", "db_password",
-        }
-        if not isinstance(data, dict):
-            return data
-
-        masked = {}
-        for k, v in data.items():
-            if any(s in k.lower() for s in SENSITIVE_KEYS):
-                masked[k] = "***"
-            elif isinstance(v, dict):
-                masked[k] = AgentTracker._mask_sensitive(v)
-            else:
-                masked[k] = v
-        return masked
+            self._log(logging.INFO, f"Phase '{phase_name}' complete", event="phase_end", phase=phase_name)
 
 
-# ─────────────────────────────────────────────
-# Workflow progress display
-# ─────────────────────────────────────────────
+# ── WorkflowProgressDisplay ───────────────────────────────────────────────────
+
 class WorkflowProgressDisplay:
     """
-    Displays a clean workflow progress summary on the console.
+    Live phase-progress table for a single VM validation workflow.
 
-    Shows the current state of a multi-phase validation workflow
-    in a way that's easy to follow.
+    Prints a simple status table that is updated as each phase completes.
+    Does not use curses or ANSI cursor movement — just sequential prints,
+    which work correctly in all terminals and CI environments.
+
+    Example output::
+
+        ┌──────────────┬──────────┬──────────┬────────────────────┐
+        │  Phase       │  Status  │  Time    │  Detail            │
+        ├──────────────┼──────────┼──────────┼────────────────────┤
+        │  Discovery   │  ✅ done │  4.2s    │  MongoDB found     │
+        │  Planning    │  ✅ done │  0.1s    │  5 checks          │
+        │  Validation  │  ⚙️  run  │  ...     │                    │
+        │  Evaluation  │  ⏳ wait │          │                    │
+        └──────────────┴──────────┴──────────┴────────────────────┘
+
+    Args:
+        host: Target host label shown in the header
     """
 
-    PHASES = ["discovery", "planning", "validation", "evaluation", "reporting"]
+    _PHASES = ["discovery", "planning", "validation", "evaluation"]
 
-    def __init__(self, resource: str):
-        self.resource = resource
-        self.phase_status: Dict[str, str] = {}  # phase -> "pending"|"running"|"done"|"failed"|"skipped"
-        self.logger = logging.getLogger("workflow.progress")
+    _STATUS_ICONS = {
+        "running": "⚙️  run ",
+        "done":    "✅ done",
+        "failed":  "❌ fail",
+        "warning": "⚠️  warn",
+        "skipped": "⏭️  skip",
+        "waiting": "⏳ wait",
+        "error":   "🔴 err ",
+    }
 
-    def start_workflow(self):
-        """Display workflow start banner."""
-        print(f"\n{'═'*60}")
-        print(f"  🚀 BeeAI Validation Workflow")
-        print(f"  📍 Resource: {self.resource}")
-        print(f"  🕐 Started: {datetime.now().strftime('%H:%M:%S')}")
-        print(f"{'═'*60}")
+    def __init__(self, host: str):
+        self._host = host
+        self._phases: Dict[str, Dict[str, str]] = {
+            p: {"status": "waiting", "time": "", "detail": ""}
+            for p in self._PHASES
+        }
 
-    def update_phase(self, phase: str, status: str, detail: str = ""):
+    def start_workflow(self) -> None:
+        """Print the workflow header."""
+        print(f"\n  {'─'*63}")
+        print(f"  🐝 BeeAI Validation — {_c(self._host, _BOLD)}")
+        print(f"  {'─'*63}")
+
+    def update_phase(self, phase: str, status: str, detail: str = "") -> None:
         """
-        Update phase status.
+        Update a phase's status and optionally print a progress line.
 
         Args:
-            phase: Phase name
-            status: "running" | "done" | "failed" | "skipped"
-            detail: Optional detail message
+            phase:  One of: discovery, planning, validation, evaluation
+            status: One of: running, done, failed, warning, skipped, waiting, error
+            detail: Short detail string (e.g. "4.2s", "MongoDB found")
         """
-        self.phase_status[phase] = status
+        if phase in self._phases:
+            self._phases[phase]["status"] = status
+            if detail:
+                if status == "done" and detail.endswith("s") and detail[:-1].replace(".", "").isdigit():
+                    self._phases[phase]["time"] = detail
+                else:
+                    self._phases[phase]["detail"] = detail
 
-        icons = {
-            "running": f"{Colours.CYAN}⟳{Colours.RESET}",
-            "done":    f"{Colours.GREEN}✓{Colours.RESET}",
-            "failed":  f"{Colours.RED}✗{Colours.RESET}",
-            "skipped": f"{Colours.DIM}−{Colours.RESET}",
-            "pending": f"{Colours.DIM}○{Colours.RESET}",
-        }
-        icon = icons.get(status, "?")
-        detail_str = f"  {Colours.DIM}{detail}{Colours.RESET}" if detail else ""
-        print(f"  {icon} {phase.capitalize():<15}{detail_str}")
+        icon = self._STATUS_ICONS.get(status, "❓")
+        phase_label = phase.capitalize().ljust(12)
+        detail_str = f"  {detail}" if detail else ""
+        print(f"     {phase_label}  {icon}{detail_str}")
 
-    def finish_workflow(self, status: str, score: Optional[int] = None, elapsed: float = 0):
-        """Display workflow completion summary."""
-        print(f"\n{'─'*60}")
+    def finish_workflow(
+        self,
+        status: str,
+        score: int = 0,
+        elapsed: float = 0.0,
+    ) -> None:
+        """
+        Print the workflow completion summary.
+
+        Args:
+            status:  "success" | "partial_success" | "failure"
+            score:   Validation score 0-100
+            elapsed: Total elapsed seconds
+        """
+        print(f"\n  {'─'*63}")
+
         if status == "success":
-            print(f"  ✅ Validation COMPLETE")
+            colour = _GREEN
+            icon = "✅"
+            label = "PASSED"
         elif status == "partial_success":
-            print(f"  ⚠️  Validation PARTIAL")
+            colour = _YELLOW
+            icon = "⚠️ "
+            label = "PARTIAL"
         else:
-            print(f"  ❌ Validation FAILED")
+            colour = _RED
+            icon = "❌"
+            label = "FAILED"
 
-        if score is not None:
-            bar_len = 30
-            filled = int(bar_len * score / 100)
-            bar_colour = Colours.GREEN if score >= 80 else (Colours.YELLOW if score >= 50 else Colours.RED)
-            bar = f"{bar_colour}{'█' * filled}{'░' * (bar_len - filled)}{Colours.RESET}"
-            print(f"  📊 Score: {bar} {score}/100")
+        bar_len = 20
+        filled = int(bar_len * score / 100)
+        bar = _c("█" * filled, colour) + _c("░" * (bar_len - filled), _GREY)
 
-        print(f"  ⏱  Elapsed: {elapsed:.1f}s")
-        print(f"{'═'*60}\n")
+        print(f"  {icon} {_c(label, colour, _BOLD)}  {bar}  {score}/100  ({elapsed:.1f}s)")
+        print(f"  {'─'*63}\n")
 
 # Made with Bob
