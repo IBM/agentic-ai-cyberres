@@ -13,7 +13,7 @@ import { getEnv, parseEnv } from "bee-agent-framework/internals/env";
  */
 export const FindRunningProcessesTool = new DynamicTool({
   name: "FindRunningProcesses",
-  description: "Determine what applications are running on the system by looking at running processesu. Disregard processes that are used by typical Linux system processes",
+  description: "Determine what applications are running on the system by looking at running processes. Disregard processes that are used by typical Linux system processes",
   inputSchema: z.object({
     argument: z.string()
   }),
@@ -24,7 +24,7 @@ export const FindRunningProcessesTool = new DynamicTool({
 
 	// do shell escape to run ps to see what processes are running.  Exclude kernel processes.
 	try {
-		stdout = execSync('ps  --ppid 2 -p 2 --deselect').toString();
+		stdout = execSync('ps -eo vsz,cmd | awk \'$1 > 0 { print $2 } \' | sort | uniq').toString();
 		console.log(`stdout: ${stdout}`);
 		returnString = stdout;
 	} catch (error: any) {
@@ -45,7 +45,7 @@ export const FindRunningProcessesTool = new DynamicTool({
  */
 export const MongoDBDataValidatorTool = new DynamicTool({
   name: "MongoDBDataValidator",
-  description: "This tool validates a mongod database to ensure the database is not corrupted. Do not use this tool to validate anything that is not mongod. It can only be used if mongod is currently running.",
+  description: "This tool validates a mongod database to ensure the database is not corrupted. Do not use this tool to validate anything that is not mongod. It can only be used if mongod is currently running as indicated by the FindRunningProcessesTool.",
   inputSchema: z.object({
     argument: z.string()
   }),
@@ -226,7 +226,7 @@ export const PostgreSQLDataValidatorTool = new DynamicTool({
  */
 export const SendEmailTool = new DynamicTool({
   name: "SendEmail",
-  description: "Send an email.",
+  description: "Send an email. If you do not get text output it succeeded. If you get text output it failed.",
   inputSchema: z.object({
     argument: z.string()
   }),
@@ -259,7 +259,7 @@ export const SendEmailTool = new DynamicTool({
  */
 export const FindWhatsRunningByPortsTool = new DynamicTool({
   name: "FindWhatsRunningByPorts",
-  description: "Determine what applications are running on the system by looking at open listening ports.  Disregard ports that are used by typical Linux system processes.",
+  description: "Determine what applications are running on the system by looking at open listening ports.  Disregard ports that are used by typical Linux system processes. Do not run this if the FindRunningProcessesTool found the applications.",
   inputSchema: z.object({
     min: z.number().int().min(0),
     max: z.number().int(),
