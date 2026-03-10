@@ -10,6 +10,7 @@ from datetime import datetime
 
 from beeai_framework.tools.mcp import MCPTool
 from models import CheckResult, ValidationStatus
+from beeai_agents.tool_validator import ToolValidator
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,9 @@ class ToolExecutor:
         self.mcp_tools = mcp_tools
         self.max_retries = max_retries
         self._tool_map = {tool.name: tool for tool in mcp_tools}
+        
+        # Initialize tool validator for argument validation
+        self.validator = ToolValidator(mcp_tools)
         
         logger.info(f"Tool executor initialized with {len(mcp_tools)} tools")
     
@@ -61,7 +65,7 @@ class ToolExecutor:
             Tool execution result
         
         Raises:
-            ToolExecutionError: If tool execution fails
+            ToolExecutionError: If tool execution fails or arguments are invalid
         """
         tool = self.find_tool(tool_name)
         if not tool:
@@ -70,6 +74,30 @@ class ToolExecutor:
                 extra={"agent": "ToolExecutor", "event": "tool_not_found", "tool": tool_name},
             )
             raise ToolExecutionError(f"Tool not found: {tool_name}")
+
+        # Validate tool arguments before execution
+        validation_result = self.validator.validate_tool_args(tool_name, tool_args)
+        if not validation_result.is_valid:
+            error_summary = validation_result.error_summary()
+            logger.error(
+                f"Tool argument validation failed: {tool_name}",
+                extra={
+                    "agent": "ToolExecutor",
+                    "event": "validation_failed",
+                    "tool": tool_name,
+                    "errors": validation_result.to_dict()
+                }
+            )
+            raise ToolExecutionError(
+                f"Invalid arguments for tool '{tool_name}': {error_summary}"
+            )
+        
+        # Log any warnings
+        for warning in validation_result.warnings:
+            logger.warning(
+                f"Tool argument validation warning: {warning}",
+                extra={"agent": "ToolExecutor", "tool": tool_name}
+            )
 
         t0 = time.monotonic()
         logger.debug(
