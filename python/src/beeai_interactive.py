@@ -47,6 +47,40 @@ log_file = setup_logging(
 
 import logging
 logger = logging.getLogger(__name__)
+
+# ── OpenTelemetry Instrumentation (via dedicated module) ──────────────────────
+from beeai_telemetry import (
+    initialize_telemetry,
+    flush_telemetry,
+    shutdown_telemetry,
+    trace_operation,
+    is_telemetry_enabled,
+)
+
+telemetry_enabled = os.getenv("ENABLE_TELEMETRY", "true").lower() == "true"
+if telemetry_enabled:
+    # Phoenix base URL (UI is at this URL)
+    phoenix_base = os.getenv("PHOENIX_ENDPOINT", "http://localhost:6006")
+    # OTLP endpoint must include /v1/traces path
+    phoenix_endpoint = phoenix_base.rstrip('/') + '/v1/traces'
+    enable_console = os.getenv("TELEMETRY_CONSOLE", "false").lower() == "true"
+    
+    success = initialize_telemetry(
+        service_name="beeai-validation",
+        phoenix_endpoint=phoenix_endpoint,
+        enable_console_export=enable_console,
+    )
+    
+    if not success:
+        logger.warning(
+            "Telemetry initialization failed, continuing without traces",
+            extra={"agent": "System"}
+        )
+else:
+    logger.info(
+        "Telemetry disabled (set ENABLE_TELEMETRY=true to enable)",
+        extra={"agent": "System"}
+    )
 logger.info(f"BeeAI Interactive CLI starting — log file: {log_file}", extra={"agent": "System"})
 
 # ── Application imports ───────────────────────────────────────────────────────
@@ -447,7 +481,7 @@ class BeeAIInteractiveCLI:
 
     async def execute_validation(self, prompt: str):
         """
-        Execute validation based on user prompt.
+        Execute validation based on user prompt with explicit tracing.
 
         Args:
             prompt: Natural language validation prompt
@@ -458,57 +492,101 @@ class BeeAIInteractiveCLI:
 
         exec_tracker = AgentTracker("Orchestrator")
 
-        try:
-            # Step 1: Parse prompt — extract host and credential ID
-            exec_tracker.decision("Parsing prompt to identify target host")
-            info, email_address = self.parse_prompt(prompt)
+        # Main validation workflow span
+        with trace_operation(
+            "validation_workflow",
+            attributes={
+                "prompt": prompt[:100],  # First 100 chars
+                "timestamp": datetime.now().isoformat(),
+            }
+        ):
+            try:
+                # Step 1: Parse prompt — extract host and credential ID
+                with trace_operation("parse_prompt", {"prompt": prompt}):
+                    exec_tracker.decision("Parsing prompt to identify target host")
+                    info, email_address = self.parse_prompt(prompt)
 
-            print(f"\n  ✅ Understood:")
-            print(f"     Target : {info['host']}")
-            if info.get("credential_id"):
-                print(f"     Cred ID: {info['credential_id']}")
-            if email_address:
-                print(f"     Email  : {email_address}")
-            print(f"     Mode   : Agent-driven discovery (SSH → detect workloads)")
+                print(f"\n  ✅ Understood:")
+                print(f"     Target : {info['host']}")
+                if info.get("credential_id"):
+                    print(f"     Cred ID: {info['credential_id']}")
+                if email_address:
+                    print(f"     Email  : {email_address}")
+                print(f"     Mode   : Agent-driven discovery (SSH → detect workloads)")
 
-            # Step 2: Resolve credentials + build Pydantic model
-            request = await self._resolve_and_build_request(info)
-            resource = request.resource_info
+                # Step 2: Resolve credentials + build Pydantic model
+                with trace_operation(
+                    "resolve_credentials",
+                    attributes={"host": info['host']}
+                ):
+                    request = await self._resolve_and_build_request(info)
+                    resource = request.resource_info
 
-            # Show workflow progress
-            progress = WorkflowProgressDisplay(resource.host)
-            progress.start_workflow()
+                # Show workflow progress
+                progress = WorkflowProgressDisplay(resource.host)
+                progress.start_workflow()
 
-            # Execute workflow
-            start_time = __import__("time").time()
-            progress.update_phase("discovery",  "running", "Scanning workloads...")
-            if self.orchestrator is None:
-                raise RuntimeError("Orchestrator not initialised")
-            result = await self.orchestrator.execute_workflow(request)
-            elapsed = __import__("time").time() - start_time
+                # Execute workflow with explicit phase tracing
+                start_time = __import__("time").time()
+                progress.update_phase("discovery",  "running", "Scanning workloads...")
+                
+                if self.orchestrator is None:
+                    raise RuntimeError("Orchestrator not initialised")
+                
+                # Wrap the entire workflow execution
+                with trace_operation(
+                    "execute_workflow",
+                    attributes={
+                        "host": resource.host,
+                        "auto_discover": request.auto_discover,
+                    }
+                ) as workflow_span:
+                    result = await self.orchestrator.execute_workflow(request)
+                    elapsed = __import__("time").time() - start_time
+                    
+                    # Add workflow results to span
+                    if workflow_span:
+                        workflow_span.set_attribute("workflow_status", result.workflow_status)
+                        workflow_span.set_attribute("score", result.validation_result.score)
+                        workflow_span.set_attribute("elapsed_seconds", elapsed)
+                        workflow_span.set_attribute("passed_checks", result.validation_result.passed_checks)
+                        workflow_span.set_attribute("failed_checks", result.validation_result.failed_checks)
+                        workflow_span.set_attribute("warning_checks", result.validation_result.warning_checks)
 
-            # Update progress display
-            for phase, timing in result.phase_timings.items():
-                status = "done" if phase in result.errors else "done"
-                progress.update_phase(phase, status, f"{timing:.1f}s")
+                # Update progress display
+                for phase, timing in result.phase_timings.items():
+                    status = "done" if phase not in result.errors else "done"
+                    progress.update_phase(phase, status, f"{timing:.1f}s")
 
-            progress.finish_workflow(
-                status=result.workflow_status,
-                score=result.validation_result.score,
-                elapsed=elapsed,
-            )
+                progress.finish_workflow(
+                    status=result.workflow_status,
+                    score=result.validation_result.score,
+                    elapsed=elapsed,
+                )
 
-            # Display detailed results
-            self._display_results(result)
+                # Display detailed results
+                self._display_results(result)
 
-            # Send email report if requested
-            if email_address:
-                await self._send_email_report(result, request, email_address)
+                # Send email report if requested
+                if email_address:
+                    with trace_operation("send_email_report", {"email": email_address}):
+                        await self._send_email_report(result, request, email_address)
 
-        except Exception as e:
-            exec_tracker.error(f"Validation failed: {e}", exc=e)
-            print(f"\n  ❌ Error: {e}")
-            logger.error(f"Validation error", exc_info=True, extra={"agent": "Orchestrator"})
+                # Flush traces to Phoenix immediately after validation
+                if is_telemetry_enabled():
+                    logger.debug("Flushing traces to Phoenix...", extra={"agent": "Telemetry"})
+                    flush_telemetry(timeout=10)
+
+            except Exception as e:
+                exec_tracker.error(f"Validation failed: {e}", exc=e)
+                print(f"\n  ❌ Error: {e}")
+                logger.error(f"Validation error", exc_info=True, extra={"agent": "Orchestrator"})
+                
+                # Flush traces even on error
+                if is_telemetry_enabled():
+                    flush_telemetry(timeout=10)
+                
+                raise
 
     def _display_results(self, result):
         """Display validation results in a clean, readable format."""
@@ -638,6 +716,8 @@ class BeeAIInteractiveCLI:
 
         fleet_tracker = AgentTracker("FleetOrchestrator")
 
+        # Note: Telemetry tracing is now automatic via OpenInference BeeAI instrumentation
+        
         try:
             manifest = self._parse_fleet_prompt(prompt)
         except Exception as e:
@@ -660,7 +740,7 @@ class BeeAIInteractiveCLI:
         progress.attach(results)
         progress.render()
 
-        # Run fleet
+        # Run fleet - BeeAIInstrumentor automatically traces all operations
         fleet_orch = FleetOrchestrator(self)
         # Monkey-patch _run_one to update display after each target finishes
         _orig_run_one = fleet_orch._run_one

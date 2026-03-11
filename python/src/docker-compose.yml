@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: beeai-phoenix
+    ports:
+      - "6006:6006"
+      - "4318:4318"  # OTLP HTTP (legacy)
+      - "4317:4317"  # OTLP gRPC (primary)
+    environment:
+      - PHOENIX_OTLP_HTTP_ENDPOINT=0.0.0.0:4318
+      - PHOENIX_WORKING_DIR=/phoenix-data
+      - PHOENIX_SQL_DATABASE_URL=sqlite:////phoenix-data/phoenix.db
+    volumes:
+      - phoenix-data:/phoenix-data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6006/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - beeai-network
+
+  beeai-orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: beeai-orchestrator
+    environment:
+      - ENABLE_TELEMETRY=true
+      - PHOENIX_ENDPOINT=http://phoenix:4318/v1/traces
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+    depends_on:
+      phoenix:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - beeai-network
+    # For interactive mode, use stdin_open and tty
+    stdin_open: true
+    tty: true
+
+networks:
+  beeai-network:
+    name: beeai-network
+    driver: bridge
+
+volumes:
+  phoenix-data:
+    driver: local
+
+# Made with Bob

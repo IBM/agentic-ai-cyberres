@@ -21,7 +21,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 # BeeAI imports
-from beeai_framework.agents.requirement.agent import RequirementAgent
+from beeai_framework.agents.react.agent import ReActAgent
 from beeai_framework.backend.chat import ChatModel
 from beeai_framework.memory import SlidingMemory, SlidingMemoryConfig
 
@@ -175,41 +175,36 @@ Evaluation Process:
             f"BeeAI Evaluation Agent initialized with model: {llm_model}"
         )
     
-    def _create_evaluation_agent(self) -> RequirementAgent:
-        """Create evaluation agent for result analysis.
+    def _create_evaluation_agent(self) -> ReActAgent:
+        """Create evaluation agent for result analysis using ReActAgent.
+        
+        ReActAgent provides better reasoning capabilities for evaluation tasks
+        compared to RequirementAgent, allowing for chain-of-thought analysis
+        and more nuanced assessment of validation results.
         
         Returns:
-            Configured RequirementAgent for evaluation
+            Configured ReActAgent for evaluation with reasoning
         """
         if self._evaluation_agent is not None:
             return self._evaluation_agent
         
-        logger.info("Creating evaluation agent...")
+        logger.info("Creating ReActAgent for evaluation (enhanced reasoning)...")
         
-        # Create LLM
+        # Create LLM with slightly higher temperature for nuanced analysis
         llm = ChatModel.from_name(self.llm_model)
         
         # Create memory (larger for evaluation context)
         memory = SlidingMemory(SlidingMemoryConfig(size=self.memory_size))
         
-        # Create evaluation agent
-        self._evaluation_agent = RequirementAgent(
+        # Create evaluation agent using ReActAgent for better reasoning
+        # Note: ReActAgent API is simpler - just llm, memory, tools
+        self._evaluation_agent = ReActAgent(
             llm=llm,
             memory=memory,
-            tools=[],  # Evaluation doesn't need tools
-            name="Validation Evaluation Agent",
-            description="Provides comprehensive evaluation of validation results with actionable insights",
-            role="Infrastructure Validation Analyst",
-            instructions=self.EVALUATION_INSTRUCTIONS,
-            notes=[
-                "Always provide detailed reasoning for severity assessments",
-                "Consider business impact, not just technical failures",
-                "Provide specific remediation steps, not generic advice",
-                "Prioritize recommendations by urgency and impact"
-            ],
+            tools=[]  # Evaluation doesn't need tools, only reasoning
         )
         
-        logger.info("Evaluation agent created")
+        logger.info("ReActAgent evaluation agent created with enhanced reasoning")
         return self._evaluation_agent
     
     async def evaluate(
@@ -378,24 +373,58 @@ Evaluation Process:
             if len(passed_checks) > 10:
                 prompt_parts.append(f"- ... and {len(passed_checks) - 10} more")
         
-        # Add evaluation requirements
+        # Add evaluation requirements with reasoning instructions for ReActAgent
         prompt_parts.extend([
             "",
-            "## Your Evaluation Task",
-            "Provide a comprehensive evaluation including:",
+            "## Your Evaluation Task (Use Chain-of-Thought Reasoning)",
             "",
-            "1. **Overall Health Assessment**: Rate the system health (excellent/good/fair/poor/critical)",
-            "2. **Severity Analysis**: For each failed/warning check, assess severity and impact",
-            "3. **Root Cause Analysis**: Identify potential root causes where possible",
-            "4. **Remediation Steps**: Provide specific, actionable steps to resolve issues",
-            "5. **Prioritized Recommendations**: Order recommendations by urgency and impact",
-            "6. **Next Steps**: Suggest concrete next steps for the operations team",
+            "Provide a comprehensive evaluation using step-by-step reasoning:",
             "",
-            "Consider:",
-            "- Resource type and discovered applications",
-            "- Business impact of failures",
-            "- Dependencies and cascading effects",
-            "- Industry best practices",
+            "### Step 1: Analyze Each Failure",
+            "For each failed check, reason through:",
+            "- What specifically failed and why?",
+            "- What is the immediate impact?",
+            "- What could be the root cause?",
+            "",
+            "### Step 2: Identify Patterns",
+            "Look for patterns across failures:",
+            "- Are multiple failures related?",
+            "- Is there a common root cause?",
+            "- Are there cascading effects?",
+            "",
+            "### Step 3: Assess Business Impact",
+            "Consider the business context:",
+            "- What is the resource type and its criticality?",
+            "- What applications are affected?",
+            "- What is the urgency level?",
+            "",
+            "### Step 4: Determine Severity",
+            "For each issue, explain your severity rating:",
+            "- Why is this critical/high/medium/low?",
+            "- What is the justification?",
+            "- What would happen if not addressed?",
+            "",
+            "### Step 5: Develop Remediation Plan",
+            "Provide specific, actionable steps:",
+            "- What should be done first?",
+            "- What are the dependencies?",
+            "- What is the expected outcome?",
+            "",
+            "### Step 6: Prioritize Recommendations",
+            "Order recommendations by:",
+            "- Urgency (immediate vs. can wait)",
+            "- Impact (high business impact first)",
+            "- Effort (quick wins vs. complex fixes)",
+            "",
+            "### Step 7: Overall Health Rating",
+            "Based on your analysis, rate overall health:",
+            "- **excellent**: All checks passed, optimal configuration",
+            "- **good**: Minor issues only, system is stable",
+            "- **fair**: Some issues present, needs attention",
+            "- **poor**: Multiple issues, immediate action needed",
+            "- **critical**: System failure, emergency response required",
+            "",
+            "**Important**: Show your reasoning process for each step. Explain WHY, not just WHAT.",
             "",
             "Respond with a complete OverallEvaluation including all required fields."
         ])
