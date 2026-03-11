@@ -1,6 +1,14 @@
 # BeeAI Recovery Validation Agent
 
-An agentic infrastructure validation system built on the [BeeAI Framework](https://github.com/i-am-bee/beeai-framework). It connects to target VMs, Oracle databases, and MongoDB instances over SSH, runs a structured set of health checks via MCP tools, evaluates the results with an LLM, and emails a report — all driven by a single natural-language prompt.
+An enterprise-grade agentic infrastructure validation system built on the [BeeAI Framework](https://github.com/i-am-bee/beeai-framework). It automates post-disaster recovery and cyber-attack recovery validation by connecting to target VMs, Oracle databases, and MongoDB instances over SSH, running structured health checks via MCP tools, and providing comprehensive evaluation reports with full observability through Arize Phoenix.
+
+**Key Features:**
+- 🤖 **Autonomous Validation**: Single natural-language prompt triggers complete validation workflow
+- 🔒 **Secure Credential Management**: No passwords in prompts; centralized secrets management
+- 📊 **Enterprise Observability**: OpenTelemetry instrumentation with Arize Phoenix integration
+- 🔧 **MCP Tool Integration**: Custom Model Context Protocol server with 20+ validation tools
+- 🎯 **Deterministic Planning**: Programmatic constraint enforcement prevents LLM hallucinations
+- 📧 **Automated Reporting**: HTML email reports with detailed health assessments
 
 ---
 
@@ -13,10 +21,11 @@ An agentic infrastructure validation system built on the [BeeAI Framework](https
 5. [Workflow Lifecycle](#workflow-lifecycle)
 6. [Credential Management](#credential-management)
 7. [Observability & Logging](#observability--logging)
-8. [Configuration & Setup](#configuration--setup)
-9. [Running the Agent](#running-the-agent)
-10. [Scaling to Multiple Resources](#scaling-to-multiple-resources)
-11. [Design Decisions & Known Issues](#design-decisions--known-issues)
+8. [Phoenix Observability Integration](#phoenix-observability-integration)
+9. [Configuration & Setup](#configuration--setup)
+10. [Running the Agent](#running-the-agent)
+11. [Scaling to Multiple Resources](#scaling-to-multiple-resources)
+12. [Design Decisions & Known Issues](#design-decisions--known-issues)
 
 ---
 
@@ -223,7 +232,7 @@ Executes each `ValidationCheck` in the plan sequentially. For each check:
 
 ### 5. Evaluation Agent (`beeai_agents/evaluation_agent.py`)
 
-**Mode**: LLM (BeeAI `RequirementAgent`)
+**Mode**: LLM (BeeAI `ReActAgent`)
 
 Takes the full `ResourceValidationResult` and produces an `OverallEvaluation`:
 - `overall_health`: excellent / good / fair / poor / critical
@@ -400,32 +409,12 @@ Credentials are stored in `python/cyberres-mcp/secrets.json` (gitignored). The f
       "username": "admin",
       "password": "mongo_pass"
     }
-  },
-  "9.11.69.88": {
-    "ssh": {
-      "username": "vikas",
-      "password": "vikas1234"
-    }
   }
 }
 ```
 
-The key can be:
-- A logical credential ID (e.g. `vm-prod-01`, `mongo-staging`) — referenced in the prompt as `use credential vm-prod-01`
-- A hostname or IP address — the agent looks up by the target host automatically
-
 See `python/cyberres-mcp/secrets.example.json` for a full example.
 
-### Lookup priority
-
-1. Explicit credential ID from prompt (e.g. `use credential vm-prod-01`)
-2. Exact hostname/IP match in secrets.json
-3. Partial hostname match
-4. Environment variables (`SSH_USER`, `SSH_PASSWORD`, `SSH_KEY_PATH`)
-
-### Extending to a secrets manager
-
-The `CredentialResolver` in `orchestrator.py` loads `secrets.json` via a simple JSON read. To integrate with AWS Secrets Manager, HashiCorp Vault, or Azure Key Vault, replace the `_load_secrets_file()` method with an API call to your secrets manager. The rest of the system is unchanged — credentials flow through the same `VMResourceInfo` object.
 
 ---
 
@@ -489,6 +478,135 @@ Noisy loggers (`mcp.*`, `paramiko.*`, `httpx`, `asyncio`) are suppressed on cons
 
 ---
 
+## Phoenix Observability Integration
+
+The system includes enterprise-grade observability through [Arize Phoenix](https://phoenix.arize.com/), providing distributed tracing, performance monitoring, and LLM interaction analysis.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    BeeAI Validation Workflow                        │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────┐  │
+│  │  Discovery   │→ │  Planning    │→ │  Validation  │→ │  Eval  │  │
+│  │  Agent       │  │  Agent       │  │  Agent       │  │ Agent  │  │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └───┬────┘  │
+│         │                 │                 │              │        │
+│         └─────────────────┴─────────────────┴──────────────┘        │
+│                              │                                       │
+│                    OpenTelemetry Instrumentation                    │
+│                    (openinference-instrumentation-beeai)            │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ OTLP/HTTP
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                      Arize Phoenix (v4.0+)                          │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐             │
+│  │  Trace       │  │  Metrics     │  │  LLM         │             │
+│  │  Collection  │  │  Analysis    │  │  Evaluation  │             │
+│  └──────────────┘  └──────────────┘  └──────────────┘             │
+│                                                                     │
+│  UI: http://localhost:6006                                          │
+│  OTLP HTTP: http://localhost:4318                                   │
+│  OTLP gRPC: http://localhost:4317                                   │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Features
+
+**Distributed Tracing**
+- End-to-end trace visibility across all 4 validation phases
+- Automatic span creation for agent interactions
+- LLM call tracking with token usage and latency
+- MCP tool execution traces with parameters and results
+
+**Performance Monitoring**
+- Agent execution time breakdown
+- Tool call latency analysis
+- LLM response time tracking
+- Workflow bottleneck identification
+
+**LLM Observability**
+- Prompt and completion logging
+- Token usage tracking
+- Model performance metrics
+- Chain-of-thought reasoning visualization
+
+### Setup
+
+**1. Start Phoenix with Docker Compose**
+
+```bash
+cd python/src
+docker-compose up -d phoenix
+```
+
+This starts Phoenix with:
+- Web UI on port 6006
+- OTLP HTTP endpoint on port 4318
+- OTLP gRPC endpoint on port 4317
+- Persistent storage in `phoenix-data` volume
+
+**2. Configure Environment**
+
+Add to `python/src/.env`:
+
+```bash
+# Phoenix Observability
+PHOENIX_ENDPOINT=http://localhost:6006
+PHOENIX_PROJECT_NAME=beeai-recovery-validation
+```
+
+**3. Verify Phoenix is Running**
+
+```bash
+curl http://localhost:6006/healthz
+# Should return: {"status":"healthy"}
+```
+
+**4. Access Phoenix UI**
+
+Open http://localhost:6006 in your browser to view:
+- Real-time traces
+- Performance dashboards
+- LLM interaction analysis
+- Agent workflow visualization
+
+### Trace Data
+
+Each validation workflow creates a comprehensive trace tree:
+
+```
+Validation Workflow (root span)
+├── Phase 1: Discovery
+│   ├── LLM Call: Classify workload
+│   ├── MCP Tool: discover_workload
+│   └── LLM Call: Interpret results
+├── Phase 2: Planning (deterministic, no LLM)
+│   └── Build validation plan
+├── Phase 3: Validation
+│   ├── MCP Tool: tcp_portcheck
+│   ├── MCP Tool: db_mongo_ssh_ping
+│   ├── MCP Tool: db_mongo_ssh_rs_status
+│   ├── MCP Tool: validate_collection
+│   ├── MCP Tool: vm_linux_uptime_load_mem
+│   ├── MCP Tool: vm_linux_fs_usage
+│   └── MCP Tool: vm_linux_services
+└── Phase 4: Evaluation
+    ├── LLM Call: Analyze results
+    └── LLM Call: Generate recommendations
+```
+
+### Metrics Available
+
+- **Workflow Duration**: Total time from prompt to report
+- **Phase Breakdown**: Time spent in each validation phase
+- **Tool Execution**: Individual tool call latency and success rate
+- **LLM Performance**: Token usage, response time, model efficiency
+- **Error Rates**: Failed checks, retry attempts, timeout occurrences
+
+
+
 ## Configuration & Setup
 
 ### Prerequisites
@@ -496,6 +614,7 @@ Noisy loggers (`mcp.*`, `paramiko.*`, `httpx`, `asyncio`) are suppressed on cons
 - Python 3.11+
 - [uv](https://github.com/astral-sh/uv) package manager
 - [Ollama](https://ollama.ai) running locally with `llama3.2` model pulled
+- Docker and Docker Compose (for Phoenix observability)
 - SSH access to target VMs
 
 ### 1. Install dependencies
@@ -534,6 +653,10 @@ EMAIL_FROM=noreply@yourdomain.com
 
 # Logging
 LOG_LEVEL=INFO
+
+# Phoenix Observability
+PHOENIX_ENDPOINT=http://localhost:6006
+PHOENIX_PROJECT_NAME=beeai-recovery-validation
 ```
 
 ### 3. Configure credentials
@@ -563,7 +686,21 @@ Create `python/cyberres-mcp/secrets.json`:
 ollama pull llama3.2
 ```
 
-### 5. Verify MCP server
+### 5. Start Phoenix (optional but recommended)
+
+```bash
+cd python/src
+docker-compose up -d phoenix
+```
+
+Verify Phoenix is running:
+```bash
+curl http://localhost:6006/healthz
+```
+
+Access Phoenix UI at http://localhost:6006
+
+### 6. Verify MCP server
 
 ```bash
 cd python/cyberres-mcp
@@ -579,7 +716,7 @@ uv run cyberres-mcp
 
 ```bash
 cd python/src
-uv run python run_beeai_validation.py
+uv run python beeai_interactive.py
 ```
 
 You will see a prompt:
@@ -688,10 +825,14 @@ MongoDB typically listens on `127.0.0.1:27017` only (not exposed on the network)
 
 ```
 python/src/
-├── run_beeai_validation.py      # Main entry point (interactive CLI)
+├── beeai_interactive.py         # Main entry point (interactive CLI)
+├── beeai_telemetry.py           # Phoenix/OpenTelemetry integration
 ├── models.py                    # Pydantic data models (ResourceInfo, CheckResult, etc.)
 ├── credentials.py               # Legacy env-var credential manager
 ├── email_service.py             # SMTP / SendGrid email sender
+├── docker-compose.yml           # Docker services (Phoenix)
+├── Dockerfile                   # Container image for deployment
+├── requirements.txt             # Python dependencies
 ├── .env.example                 # Environment variable template
 │
 ├── beeai_agents/
@@ -699,8 +840,8 @@ python/src/
 │   ├── discovery_agent.py       # Phase 1: workload discovery
 │   ├── validation_agent.py      # Phase 2 (planning) + Phase 3 (execution)
 │   ├── tool_executor.py         # MCP tool execution + result parsing
-│   ├── evaluation_agent.py      # Phase 4: LLM health assessment
-│   ├── base_agent.py            # Abstract base class for all agents
+│   ├── evaluation_agent.py      # Phase 4: LLM health assessment (ReActAgent)
+│   ├── tool_validator.py        # MCP tool validation
 │   └── config.py                # BeeAIConfig (LLM, memory, MCP settings)
 │
 ├── agent_logging/
