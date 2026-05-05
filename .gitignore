@@ -170,3 +170,45 @@ __pycache__/
 # (committed .env files must only contain CHANGE_ME placeholders)
 .env.local
 .env.*.local
+
+# =============================================================================
+# Archive and Documentation
+# =============================================================================
+# Archived documentation and old files
+archive/
+
+# =============================================================================
+# Chainlit Runtime Files
+# =============================================================================
+# Chainlit session data and cache
+.chainlit/
+.files/
+public/
+
+# Chainlit build artifacts
+chainlit.db
+.chainlit.db
+
+# =============================================================================
+# Additional Python Runtime Files
+# =============================================================================
+# UV lock files (if using uv package manager)
+uv.lock
+
+# Telemetry and observability data
+telemetry/
+traces/
+spans/
+
+# MongoDB local data (if running locally)
+mongodb_data/
+mongo_data/
+
+# Classification cache
+classification_cache.json
+*.cache.json
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
