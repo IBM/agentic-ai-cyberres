@@ -28,6 +28,9 @@ from beeai_framework.tools.mcp import MCPTool
 # MCP client imports
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
+# Output management imports
+from agents.output import OutputManager, VerbosityLevel
+
 # Local imports
 from models import (
     WorkloadDiscoveryResult,
@@ -139,6 +142,15 @@ Provide a discovery plan with:
         # Planning agent will be created on first use
         self._planning_agent = None
         
+        # Initialize output manager for clean agent response display
+        from agents.output import OutputConfig
+        config = OutputConfig(
+            console_verbosity=VerbosityLevel.STANDARD,
+            show_agent_name=True,
+            show_timestamps=False
+        )
+        self.output_manager = OutputManager(config=config)
+        
         logger.info(
             f"BeeAI Discovery Agent initialized with model: {llm_model}"
         )
@@ -168,6 +180,9 @@ Provide a discovery plan with:
                 **os.environ,
                 "MCP_TRANSPORT": "stdio",
                 "PYTHONPATH": str(server_path / "src"),
+                "LOG_LEVEL": "WARNING",      # suppress MCP server logs
+                "LOGURU_LEVEL": "WARNING",
+                "FASTMCP_QUIET": "1",        # suppress FastMCP banner
             }
         )
         
@@ -304,6 +319,13 @@ Respond with a JSON object containing:
             result = await planning_agent.run(
                 prompt,
                 expected_output=DiscoveryPlan
+            )
+            
+            # Process agent response for clean console output
+            self.output_manager.process_agent_response(
+                response=result,
+                agent_name="Discovery",
+                phase="planning"
             )
             
             if result.output_structured:
@@ -532,11 +554,12 @@ Respond with a JSON object containing:
                     len(result.processes) > 0
                 )
                 
-                # Also check if OS was detected (not "Unknown")
+                # Also check if OS was detected - check for os_type (not os_name)
                 os_detected = False
                 if hasattr(result, 'os_info') and result.os_info:
-                    os_name = result.os_info.get('os_name', 'Unknown')
-                    os_detected = os_name not in ['Unknown', '', None]
+                    # MCP tools return 'os_type', not 'os_name'
+                    os_type = result.os_info.get('os_type', 'Unknown')
+                    os_detected = os_type not in ['Unknown', '', None]
                 
                 logger.info(f"Comprehensive discovery result: has_data={has_data}, os_detected={os_detected}")
                 
@@ -548,7 +571,9 @@ Respond with a JSON object containing:
                     logger.warning("✗ Comprehensive discovery returned empty/invalid results")
                     logger.warning("  Applications: %d, Ports: %d, Processes: %d",
                                  len(result.applications), len(result.ports), len(result.processes))
-                    logger.warning("  OS: %s", result.os_info.get('os_name', 'Unknown') if hasattr(result, 'os_info') and result.os_info else 'No OS info')
+                    # Check for os_type (not os_name) in warning message
+                    os_display = result.os_info.get('os_type', 'Unknown') if hasattr(result, 'os_info') and result.os_info else 'No OS info'
+                    logger.warning("  OS: %s", os_display)
                     logger.warning("  Falling back to individual tools...")
             except Exception as e:
                 logger.warning(f"✗ Comprehensive discovery failed with exception: {e}")
@@ -697,36 +722,83 @@ Respond with a JSON object containing:
             error_msg = result.get('error', 'Unknown error')
             raise Exception(f"Comprehensive discovery failed: {error_msg}")
         
-        # Extract data
-        data = result.get("data", {})
+        # Extract data - handle both wrapped and unwrapped responses
+        # MCP tools may return data directly or wrapped in {"data": {...}}
+        logger.debug(f"Result type: {type(result)}, Result keys: {list(result.keys()) if isinstance(result, dict) else 'NOT A DICT'}")
+        logger.debug(f"Result has 'data' key: {'data' in result if isinstance(result, dict) else False}")
+        
+        if "data" in result and isinstance(result.get("data"), dict):
+            data = result["data"]
+            logger.debug("Extracted data from result['data']")
+        else:
+            # Result is already the data dictionary
+            data = result
+            logger.debug("Using result directly as data")
+        
+        logger.debug(f"Data type after extraction: {type(data)}, is dict: {isinstance(data, dict)}")
+        logger.debug(f"Data keys after extraction: {list(data.keys()) if isinstance(data, dict) else 'NOT A DICT'}")
         
         # Check if data is empty or missing
-        if not data:
+        if not data or not isinstance(data, dict):
             logger.warning(f"discover_workload returned no data, falling back to individual tools")
+            logger.warning(f"Data value: {data}")
             raise Exception("No data returned from discover_workload")
         
+        # Additional validation: check for expected keys
+        expected_keys = ["os_info", "applications"]
+        has_expected_data = any(key in data for key in expected_keys)
+        
+        logger.debug(f"Checking for expected keys {expected_keys} in data keys: {list(data.keys())}")
+        logger.debug(f"Has expected data: {has_expected_data}")
+        
+        if not has_expected_data:
+            logger.warning(f"discover_workload returned data but missing expected keys: {expected_keys}")
+            logger.debug(f"Received keys: {list(data.keys())}")
+            raise Exception("No valid discovery data returned from discover_workload")
+        
         # DEBUG: Log data structure
-        logger.info(f"Data keys: {list(data.keys())}")
-        logger.info(f"Applications in data: {data.get('applications', 'KEY NOT FOUND')}")
+        logger.info(f"✓ Data extraction successful - Keys: {list(data.keys())}")
+        logger.info(f"✓ OS Info present: {'os_info' in data}")
+        logger.info(f"✓ Applications present: {'applications' in data}")
+        if 'applications' in data:
+            logger.info(f"✓ Applications count: {len(data.get('applications', []))}")
         
         logger.info(f"Comprehensive discovery completed for {resource.host}")
         logger.info(f"Found {len(data.get('applications', []))} applications")
         
-        # Convert to WorkloadDiscoveryResult
+        # Helper functions to clean dictionaries before model creation
+        def clean_port_dict(port_dict: dict) -> dict:
+            """Ensure port dict has valid values for PortInfo model."""
+            cleaned = port_dict.copy()
+            if cleaned.get("state") is None:
+                cleaned["state"] = "open"
+            return cleaned
+        
+        def clean_process_dict(proc_dict: dict) -> dict:
+            """Ensure process dict has valid values for ProcessInfo model."""
+            cleaned = proc_dict.copy()
+            if "user" not in cleaned or cleaned["user"] is None:
+                cleaned["user"] = "unknown"
+            if "cmdline" not in cleaned or cleaned["cmdline"] is None:
+                cleaned["cmdline"] = ""
+            return cleaned
+        
+        # Convert to WorkloadDiscoveryResult - preserve OS info
         return WorkloadDiscoveryResult(
             host=resource.host,
             ports=[
-                PortInfo(**port) if isinstance(port, dict) else port
+                PortInfo(**clean_port_dict(port)) if isinstance(port, dict) else port
                 for port in data.get("ports", [])
             ],
             processes=[
-                ProcessInfo(**proc) if isinstance(proc, dict) else proc
+                ProcessInfo(**clean_process_dict(proc)) if isinstance(proc, dict) else proc
                 for proc in data.get("processes", [])
             ],
             applications=[
                 ApplicationDetection(**app) if isinstance(app, dict) else app
                 for app in data.get("applications", [])
             ],
+            os_info=data.get("os_info"),  # Preserve OS information
             discovery_time=datetime.now()
         )
     
@@ -764,6 +836,7 @@ Respond with a JSON object containing:
                 ports=[],
                 processes=[],
                 applications=[],
+                os_info=None,
                 discovery_time=datetime.now()
             )
         
@@ -804,8 +877,31 @@ Respond with a JSON object containing:
                 app_result = json.loads(app_result_output.result)
             else:
                 app_result = app_result_output.result
+
+            # MCP responses can be either:
+            # 1) {"ok": true, ...payload fields...}
+            # 2) {"ok": true, "data": {...payload fields...}}
+            # Normalize both shapes so downstream parsing is consistent.
+            app_payload = app_result.get("data") if isinstance(app_result.get("data"), dict) else app_result
+            os_payload = os_result.get("data") if isinstance(os_result.get("data"), dict) else os_result
             
-            logger.debug(f"Application discovery result: {app_result}")
+            # DEBUG: Log full application discovery response
+            logger.info("=" * 60)
+            logger.info("APPLICATION DISCOVERY RESPONSE")
+            logger.info("=" * 60)
+            logger.info(f"Full response: {json.dumps(app_result, indent=2)[:1000]}")
+            logger.info(f"Response keys: {list(app_result.keys())}")
+            logger.info(f"Normalized payload keys: {list(app_payload.keys())}")
+            logger.info(f"Applications key exists: {'applications' in app_payload}")
+            logger.info(f"Ports key exists: {'ports' in app_payload}")
+            logger.info(f"Processes key exists: {'processes' in app_payload}")
+            if 'applications' in app_payload:
+                logger.info(f"Applications count: {len(app_payload.get('applications', []))}")
+            if 'ports' in app_payload:
+                logger.info(f"Ports count: {len(app_payload.get('ports', []))}")
+            if 'processes' in app_payload:
+                logger.info(f"Processes count: {len(app_payload.get('processes', []))}")
+            logger.info("=" * 60)
             
             # Check for success
             os_success = os_result.get("success") or os_result.get("ok")
@@ -819,18 +915,60 @@ Respond with a JSON object containing:
                     ports=[],
                     processes=[],
                     applications=[],
+                    os_info=None,
                     discovery_time=datetime.now()
                 )
             
             # Extract data from both results
-            # Note: discover_os_only returns data in "data" key
-            # but discover_applications returns data at root level
-            os_data = os_result.get("data", {})
-            
-            # Applications are at root level, not in "data" key
-            applications = app_result.get("applications", [])
-            ports = app_result.get("ports", [])
-            processes = app_result.get("processes", [])
+            os_data = os_payload
+            applications = app_payload.get("applications") or []
+
+            # Prefer explicit ports/processes from tool payload when present.
+            ports = app_payload.get("ports") or []
+            processes = app_payload.get("processes") or []
+
+            # Backward compatibility: older tool responses did not expose
+            # ports/processes at top level. Derive them from applications.
+            if not ports or not processes:
+                extracted_ports = []
+                extracted_processes = []
+
+                for app in applications:
+                    if not isinstance(app, dict):
+                        continue
+
+                    # Extract network bindings (ports)
+                    if "network_bindings" in app and app["network_bindings"]:
+                        for binding in app["network_bindings"]:
+                            port_info = {
+                                "port": binding.get("port"),
+                                "protocol": binding.get("protocol", "tcp"),
+                                "service": app.get("name"),  # Use app name as service
+                                "state": binding.get("state") or "open",  # Ensure not None
+                                "banner": None
+                            }
+                            extracted_ports.append(port_info)
+
+                    # Extract process info
+                    if "process_info" in app and app["process_info"]:
+                        proc_info = app["process_info"]
+                        if proc_info.get("pid") is not None:
+                            process = {
+                                "pid": proc_info.get("pid"),
+                                "name": app.get("name"),  # Use app name
+                                "cmdline": proc_info.get("command", ""),
+                                "user": proc_info.get("user", "unknown"),
+                                "cpu_percent": None,
+                                "memory_mb": None
+                            }
+                            extracted_processes.append(process)
+
+                if not ports:
+                    ports = extracted_ports
+                if not processes:
+                    processes = extracted_processes
+
+            logger.info(f"Extracted {len(ports)} ports and {len(processes)} processes from {len(applications)} applications")
             
             # Combine results
             logger.info(f"Discovery completed successfully for {resource.host}")
@@ -861,18 +999,100 @@ Respond with a JSON object containing:
                 else:
                     converted_apps.append(app)
             
+            # ============================================================
+            # LLM-BASED AGGREGATION
+            # ============================================================
+            # Use LLM aggregator to intelligently correlate discovery data
+            logger.info("=" * 60)
+            logger.info("ATTEMPTING LLM-BASED AGGREGATION")
+            logger.info("=" * 60)
+            
+            try:
+                # Import LLM aggregator from agents (correct location)
+                from agents.llm_aggregator import LLMAggregator
+                
+                # Create aggregator
+                aggregator = LLMAggregator(llm_model=self.llm_model)
+                
+                # Prepare data for aggregation
+                ports_dict = [p if isinstance(p, dict) else p.model_dump() for p in ports]
+                processes_dict = [p if isinstance(p, dict) else p.model_dump() for p in processes]
+                apps_dict = [a if isinstance(a, dict) else a.model_dump() for a in converted_apps]
+                
+                logger.info(f"Calling LLM aggregator with {len(ports_dict)} ports, "
+                          f"{len(processes_dict)} processes, {len(apps_dict)} applications")
+                
+                # Call LLM aggregator
+                aggregated = await aggregator.aggregate(
+                    ports=ports_dict,
+                    processes=processes_dict,
+                    applications=apps_dict,
+                    os_info=os_data
+                )
+                
+                logger.info(f"✓ LLM aggregation successful (method: {aggregated.get('aggregation_method')})")
+                logger.info(f"  Correlations found: {len(aggregated.get('correlations', []))}")
+                logger.info(f"  Dependencies found: {len(aggregated.get('dependencies', []))}")
+                logger.info(f"  LLM insights: {len(aggregated.get('llm_insights', []))}")
+                
+                # Log insights
+                for insight in aggregated.get('llm_insights', [])[:3]:
+                    logger.info(f"  💡 {insight}")
+                
+                # Use enhanced applications from aggregator
+                enhanced_apps = aggregated.get('applications', apps_dict)
+                
+                # Convert enhanced apps back to ApplicationDetection objects
+                final_apps = []
+                for app in enhanced_apps:
+                    if isinstance(app, dict):
+                        app_copy = app.copy()
+                        if "confidence" in app_copy:
+                            app_copy["confidence"] = convert_confidence(app_copy["confidence"])
+                        final_apps.append(ApplicationDetection(**app_copy))
+                    else:
+                        final_apps.append(app)
+                
+                logger.info(f"✓ Using LLM-enhanced applications ({len(final_apps)} total)")
+                
+            except Exception as e:
+                logger.warning(f"✗ LLM aggregation failed: {e}")
+                logger.warning("  Falling back to deterministic aggregation")
+                final_apps = converted_apps
+            
             # Convert to WorkloadDiscoveryResult
+            # Helper function to clean port dictionaries
+            def clean_port_dict(port_dict):
+                """Ensure port dict has valid values for PortInfo model."""
+                cleaned = port_dict.copy()
+                # Ensure state is never None
+                if cleaned.get("state") is None:
+                    cleaned["state"] = "open"
+                return cleaned
+            
+            # Helper function to clean process dictionaries
+            def clean_process_dict(proc_dict):
+                """Ensure process dict has valid values for ProcessInfo model."""
+                cleaned = proc_dict.copy()
+                # Ensure required fields are present
+                if "user" not in cleaned or cleaned["user"] is None:
+                    cleaned["user"] = "unknown"
+                if "cmdline" not in cleaned or cleaned["cmdline"] is None:
+                    cleaned["cmdline"] = ""
+                return cleaned
+            
             return WorkloadDiscoveryResult(
                 host=resource.host,
                 ports=[
-                    PortInfo(**port) if isinstance(port, dict) else port
+                    PortInfo(**clean_port_dict(port)) if isinstance(port, dict) else port
                     for port in ports
                 ],
                 processes=[
-                    ProcessInfo(**proc) if isinstance(proc, dict) else proc
+                    ProcessInfo(**clean_process_dict(proc)) if isinstance(proc, dict) else proc
                     for proc in processes
                 ],
-                applications=converted_apps,
+                applications=final_apps,
+                os_info=os_data,  # Preserve OS information from discover_os_only
                 discovery_time=datetime.now()
             )
             
@@ -884,6 +1104,7 @@ Respond with a JSON object containing:
                 ports=[],
                 processes=[],
                 applications=[],
+                os_info=None,
                 discovery_time=datetime.now()
             )
     
@@ -947,22 +1168,28 @@ Respond with a JSON object containing:
                 ports=[],
                 processes=[],
                 applications=[],
+                os_info=None,
                 discovery_time=datetime.now()
             )
         
         # Extract raw data
         raw_data = result.get("data", {})
         
+        # Extract OS info if available
+        os_info = raw_data.get("os_info")
+        
         # TODO: Use LLM to analyze raw data and detect applications
         # For now, return basic structure
         logger.info(f"Raw data collected for {resource.host}")
         logger.warning("LLM-based analysis not yet implemented, returning empty applications")
+        logger.info(f"✓ Raw data collection successful - returning result")
         
         return WorkloadDiscoveryResult(
             host=resource.host,
             ports=[],  # TODO: Parse from raw data
             processes=[],  # TODO: Parse from raw data
             applications=[],  # TODO: LLM-based detection
+            os_info=os_info,  # Preserve OS information from raw data
             discovery_time=datetime.now()
         )
 

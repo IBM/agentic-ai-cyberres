@@ -11,10 +11,10 @@ programmatically).
 Design principles
 -----------------
 * **Reuse, don't rewrite** — delegates every per-target run to the existing
-  ``BeeAIValidationOrchestrator`` + ``BeeAIInteractiveCLI._resolve_and_build_request()``.
+  ``ValidationOrchestrator`` + ``InteractiveCLI._resolve_and_build_request()``.
 * **Bounded concurrency** — ``asyncio.Semaphore(max_parallel)`` prevents
   overwhelming the LLM / MCP server.
-* **Shared MCP connection** — a single ``BeeAIValidationOrchestrator`` instance
+* **Shared MCP connection** — a single ``ValidationOrchestrator`` instance
   is initialised once and reused for all targets (the MCP server is stateless
   per-call).
 * **Fail-safe** — one target failing never aborts the rest; errors are captured
@@ -74,7 +74,7 @@ class FleetOrchestrator:
     Parameters
     ----------
     cli:
-        An initialised ``BeeAIInteractiveCLI`` instance.  The fleet
+        An initialised ``InteractiveCLI`` instance.  The fleet
         orchestrator borrows its ``credential_resolver``, ``orchestrator``
         (BeeAI), and ``email_service``.
     """
@@ -90,7 +90,7 @@ class FleetOrchestrator:
         Validate all enabled targets in *manifest* and return a ``FleetReport``.
 
         Targets are run with at most ``manifest.max_parallel`` concurrent
-        workers.  Each worker uses the shared ``BeeAIValidationOrchestrator``
+        workers.  Each worker uses the shared ``ValidationOrchestrator``
         (which is thread-safe for concurrent async calls because every call
         creates its own MCP request context).
 
@@ -323,9 +323,9 @@ async def run_fleet_standalone(
         print(report.to_summary())
     """
     # Lazy import to avoid circular dependency when used as a library
-    from beeai_interactive import BeeAIInteractiveCLI
+    from cli import InteractiveCLI
 
-    cli = BeeAIInteractiveCLI()
+    cli = InteractiveCLI()
     # Override defaults if provided
     cli.orchestrator = None  # will be created in initialize()
     await cli.initialize()

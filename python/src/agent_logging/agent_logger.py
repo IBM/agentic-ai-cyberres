@@ -2,7 +2,7 @@
 # Copyright contributors to the agentic-ai-cyberres project
 #
 """
-Agent logging for BeeAI recovery-validation workflow.
+Agent logging for BeeAI recovery-validation workflow with log transformation.
 
 Provides:
   setup_logging()          — configure dual-stream logging (console + JSON file)
@@ -22,7 +22,7 @@ Usage::
     from agent_logging.agent_logger import setup_logging, AgentTracker, WorkflowProgressDisplay
 
     log_file = setup_logging(log_dir="logs", log_level="DEBUG", console_level="INFO",
-                             log_file_prefix="beeai", suppress_noisy_loggers=True)
+                             log_file_prefix="validation-agent", suppress_noisy_loggers=True)
 
     tracker = AgentTracker("DiscoveryAgent", resource="192.168.1.100")
     tracker.start("Scanning workloads")
@@ -223,12 +223,15 @@ def setup_logging(
     console_level: str = "INFO",
     log_file_prefix: str = "beeai",
     suppress_noisy_loggers: bool = True,
+    transform_logs: bool = True,
+    agent_name: str = "Agent",
 ) -> str:
     """
-    Configure dual-stream logging for the BeeAI agent.
+    Configure dual-stream logging for the BeeAI agent with optional log transformation.
 
     - Console handler: ``console_level`` (default INFO), human-readable
     - File handler:    ``log_level`` (default DEBUG), JSON lines
+    - Log transformation: Converts technical logs to agent-style narratives
 
     Args:
         log_dir:               Directory for log files (created if absent)
@@ -236,6 +239,8 @@ def setup_logging(
         console_level:         Minimum level written to the console
         log_file_prefix:       Prefix for the log file name
         suppress_noisy_loggers: Silence paramiko, mcp.*, asyncio, urllib3
+        transform_logs:        Transform technical logs to agent narratives
+        agent_name:            Name to use in transformed messages
 
     Returns:
         Absolute path to the log file created.
@@ -286,8 +291,39 @@ def setup_logging(
             "httpx",
             "httpcore",
             "beeai_framework",
+            "LiteLLM",
+            "litellm",
+            "phoenix",
+            "opentelemetry",
+            "openinference",
+            "fastmcp",
+            "alembic",
+            "sqlalchemy",
         ):
             logging.getLogger(noisy).setLevel(logging.WARNING)
+    
+    # ── Apply log transformation if enabled ────────────────────────────────────
+    if transform_logs:
+        try:
+            # Import here to avoid circular dependency
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from agents.output.log_transformer import AgentLogTransformer, AgentConsoleFormatter
+            
+            # Create transformer
+            transformer = AgentLogTransformer(agent_name=agent_name)
+            
+            # Add transformer to root logger and all MCP loggers
+            root.addFilter(transformer)
+            for mcp_logger_name in ["mcp", "mcp.ssh_utils", "mcp.client", "mcp.server"]:
+                mcp_logger = logging.getLogger(mcp_logger_name)
+                mcp_logger.addFilter(transformer)
+            
+            # Apply custom formatter to console handler
+            ch.setFormatter(AgentConsoleFormatter())
+            
+            logging.getLogger(__name__).debug(f"Log transformation enabled for {agent_name}")
+        except ImportError as e:
+            logging.getLogger(__name__).warning(f"Could not enable log transformation: {e}")
 
     return str(log_file.resolve())
 
@@ -515,7 +551,7 @@ class WorkflowProgressDisplay:
     def start_workflow(self) -> None:
         """Print the workflow header."""
         print(f"\n  {'─'*63}")
-        print(f"  🐝 BeeAI Validation — {_c(self._host, _BOLD)}")
+        print(f"  🔄 Recovery Validation — {_c(self._host, _BOLD)}")
         print(f"  {'─'*63}")
 
     def update_phase(self, phase: str, status: str, detail: str = "") -> None:
@@ -535,7 +571,7 @@ class WorkflowProgressDisplay:
                 else:
                     self._phases[phase]["detail"] = detail
 
-        icon = self._STATUS_ICONS.get(status, "❓")
+        icon = self._STATUS_ICONS.get(status, "ℹ️ ")
         phase_label = phase.capitalize().ljust(12)
         detail_str = f"  {detail}" if detail else ""
         print(f"     {phase_label}  {icon}{detail_str}")

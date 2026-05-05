@@ -20,12 +20,16 @@ import time
 def attach(mcp):
     """Register network tools onto the given FastMCP instance."""
     logger = logging.getLogger("mcp.net")
+    from mcp.types import ToolAnnotations
     try:
         from .utils import ok as resp_ok, err as resp_err
     except Exception:
         from plugins.utils import ok as resp_ok, err as resp_err  # type: ignore
 
-    @mcp.tool()
+    @mcp.tool(
+        title="TCP Port Check",
+        annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+    )
     def tcp_portcheck(host: str, ports: List[int], timeout_s: float = 1.0) -> Dict[str, Any]:
         """[Network][TCP] Check host/port reachability and latency.
 

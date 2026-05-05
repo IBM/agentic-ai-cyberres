@@ -60,12 +60,15 @@ def _parse_df_posix(df_output: str) -> List[Dict[str, Any]]:
 def attach(mcp):
     """Register VM-related tools on the given FastMCP instance."""
     logger = logging.getLogger("mcp.vm")
+    from mcp.types import ToolAnnotations
     try:
         from .utils import ok, err, resolve_ssh_auth
     except Exception:
         from plugins.utils import ok, err, resolve_ssh_auth  # type: ignore
 
-    @mcp.tool()
+    _ssh_read = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
+
+    @mcp.tool(title="VM Linux Uptime / Load / Memory", annotations=_ssh_read)
     def vm_linux_uptime_load_mem(
         host: str,
         username: str,
@@ -89,7 +92,7 @@ def attach(mcp):
             logger.warning("uptime_load_mem failed", extra={"host": host, "rc": rc})
         return ok({"rc": rc, "stdout": out, "stderr": serr}) if rc == 0 else err("ssh exec failed", code="SSH_ERROR", rc=rc, stdout=out, stderr=serr)
 
-    @mcp.tool()
+    @mcp.tool(title="VM Linux Filesystem Usage", annotations=_ssh_read)
     def vm_linux_fs_usage(
         host: str,
         username: str,
@@ -113,7 +116,7 @@ def attach(mcp):
             logger.warning("fs_usage failed", extra={"host": host, "rc": rc})
         return ok({"rc": rc, "filesystems": parsed, "stderr": serr}) if rc == 0 else err("ssh exec failed", code="SSH_ERROR", rc=rc, stderr=serr)
 
-    @mcp.tool()
+    @mcp.tool(title="VM Linux Services Check", annotations=_ssh_read)
     def vm_linux_services(
         host: str,
         username: str,
@@ -142,7 +145,7 @@ def attach(mcp):
         payload = {"rc": rc, "running": running, "required": required, "missing": missing, "stderr": serr}
         return ok(payload) if rc == 0 and not missing else err("service(s) missing or ssh error", code="SERVICE_CHECK_FAILED" if not rc else "SSH_ERROR", **payload)
 
-    @mcp.tool()
+    @mcp.tool(title="VM Validator (Legacy)", annotations=_ssh_read)
     def vm_validator(
         vm_ip: str,
         ssh_user: str,

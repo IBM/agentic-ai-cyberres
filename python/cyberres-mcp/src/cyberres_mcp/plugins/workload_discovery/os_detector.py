@@ -73,6 +73,8 @@ class OSDetector:
                 detection_methods=[],
                 raw_data={"error": str(e)}
             )
+        finally:
+            executor.close()
     
     def _detect_linux(self, ssh_exec: Callable) -> Any:
         """

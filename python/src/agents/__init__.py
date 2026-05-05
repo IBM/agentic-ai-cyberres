@@ -1,27 +1,22 @@
-#
-# Copyright contributors to the agentic-ai-cyberres project
-#
 """
-Agents package - BeeAI-powered validation agents.
+BeeAI-based agents for CyberRes Recovery Validation.
 
-Agents:
-    - base: Base agent class with common functionality
-    - discovery: Discovers workloads and applications on target systems
-    - validation: Validates resources against acceptance criteria
-    - evaluation: Evaluates validation results and generates insights
-    - orchestrator: Coordinates the multi-agent validation workflow
+This package contains agents migrated from Pydantic AI to BeeAI framework.
 """
 
-from agents.base import BaseValidationAgent, RetryMixin, CacheMixin
-from agents.orchestrator import BeeAIValidationOrchestrator, WorkflowResult, WorkflowState
+__version__ = "0.1.0"
+
+from .config import AgentConfig
+from .tool_validator import ToolValidator, ValidationResult, ValidationError
+from .tool_executor import ToolExecutor, ToolExecutionError
 
 __all__ = [
-    "BaseValidationAgent",
-    "RetryMixin",
-    "CacheMixin",
-    "BeeAIValidationOrchestrator",
-    "WorkflowResult",
-    "WorkflowState",
+    "AgentConfig",
+    "ToolValidator",
+    "ValidationResult",
+    "ValidationError",
+    "ToolExecutor",
+    "ToolExecutionError",
 ]
 
 # Made with Bob

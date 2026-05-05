@@ -97,7 +97,7 @@ class ObservabilityConfig(BaseModel):
     )
 
 
-class BeeAIConfig(BaseModel):
+class AgentConfig(BaseModel):
     """Complete BeeAI configuration."""
     
     llm: LLMConfig = Field(default_factory=LLMConfig)
@@ -135,7 +135,7 @@ class BeeAIConfig(BaseModel):
     )
     
     @classmethod
-    def from_env(cls) -> "BeeAIConfig":
+    def from_env(cls) -> "AgentConfig":
         """Create configuration from environment variables."""
         
         # LLM configuration
@@ -197,6 +197,6 @@ class BeeAIConfig(BaseModel):
 
 
 # Default configuration instance
-default_config = BeeAIConfig.from_env()
+default_config = AgentConfig.from_env()
 
 # Made with Bob

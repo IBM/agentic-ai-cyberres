@@ -10,7 +10,7 @@ from datetime import datetime
 
 from beeai_framework.tools.mcp import MCPTool
 from models import CheckResult, ValidationStatus
-from beeai_agents.tool_validator import ToolValidator
+from agents.tool_validator import ToolValidator
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,13 @@ class ToolExecutionError(Exception):
 
 class ToolExecutor:
     """Executes MCP tools with proper error handling and retry logic."""
+    
+    # Sensitive parameter names that should be masked in logs
+    SENSITIVE_PARAMS = {
+        'password', 'ssh_password', 'db_password', 'mongo_password',
+        'key_path', 'ssh_key_path', 'api_key', 'secret', 'token',
+        'credential_id', 'auth_token'
+    }
     
     def __init__(self, mcp_tools: List[MCPTool], max_retries: int = 3):
         """Initialize tool executor.
@@ -38,6 +45,21 @@ class ToolExecutor:
         self.validator = ToolValidator(mcp_tools)
         
         logger.info(f"Tool executor initialized with {len(mcp_tools)} tools")
+    
+    def _mask_sensitive_args(self, tool_args: Dict[str, Any]) -> Dict[str, Any]:
+        """Mask sensitive parameters in tool arguments for logging.
+        
+        Args:
+            tool_args: Original tool arguments
+        
+        Returns:
+            Copy of arguments with sensitive values masked
+        """
+        masked = tool_args.copy()
+        for key in masked:
+            if key.lower() in self.SENSITIVE_PARAMS:
+                masked[key] = "***"
+        return masked
     
     def find_tool(self, tool_name: str) -> Optional[MCPTool]:
         """Find tool by name.
@@ -79,13 +101,21 @@ class ToolExecutor:
         validation_result = self.validator.validate_tool_args(tool_name, tool_args)
         if not validation_result.is_valid:
             error_summary = validation_result.error_summary()
+            # Mask sensitive data in error logs
+            masked_errors = validation_result.to_dict()
+            if 'errors' in masked_errors:
+                for error in masked_errors['errors']:
+                    if 'value' in error and any(sens in error.get('field', '').lower()
+                                               for sens in self.SENSITIVE_PARAMS):
+                        error['value'] = "***"
+            
             logger.error(
                 f"Tool argument validation failed: {tool_name}",
                 extra={
                     "agent": "ToolExecutor",
                     "event": "validation_failed",
                     "tool": tool_name,
-                    "errors": validation_result.to_dict()
+                    "errors": masked_errors
                 }
             )
             raise ToolExecutionError(

@@ -35,6 +35,7 @@ class ValidationStatus(str, Enum):
 # Base Models
 class BaseResourceInfo(BaseModel):
     """Base resource information."""
+    resource_id: Optional[str] = Field(None, description="Unique resource identifier (auto-generated if not provided)")
     resource_type: ResourceType
     host: str = Field(..., description="IP address or hostname")
     description: Optional[str] = Field(None, description="User-provided description")
@@ -46,6 +47,15 @@ class BaseResourceInfo(BaseModel):
         if not v or not v.strip():
             raise ValueError("Host cannot be empty")
         return v.strip()
+    
+    def __init__(self, **data):
+        """Initialize and auto-generate resource_id if not provided."""
+        if 'resource_id' not in data or data['resource_id'] is None:
+            # Auto-generate resource_id from host
+            host = data.get('host', 'unknown')
+            resource_type = data.get('resource_type', 'unknown')
+            data['resource_id'] = f"{resource_type}-{host.replace('.', '-').replace(':', '-')}"
+        super().__init__(**data)
 
 
 class VMResourceInfo(BaseResourceInfo):
@@ -249,6 +259,26 @@ class ApplicationDetection(BaseModel):
     detection_method: str = Field("signature", description="Detection method (signature/port/process/manual)")
     evidence: Dict[str, Any] = Field(default_factory=dict, description="Evidence supporting detection")
     category: Optional[str] = Field(None, description="Application category")
+    
+    @field_validator('confidence', mode='before')
+    @classmethod
+    def convert_confidence(cls, v: Any) -> float:
+        """Convert string confidence levels to numeric values.
+        
+        Handles MCP tool responses that return confidence as strings
+        ("high", "medium", "low", "uncertain") and converts them to
+        numeric values (0.0-1.0) for Pydantic validation.
+        """
+        if isinstance(v, str):
+            # Map string confidence levels to numeric values
+            confidence_map = {
+                "high": 0.9,
+                "medium": 0.7,
+                "low": 0.5,
+                "uncertain": 0.3
+            }
+            return confidence_map.get(v.lower(), 0.5)
+        return float(v)
 
 
 class WorkloadDiscoveryResult(BaseModel):
@@ -257,6 +287,7 @@ class WorkloadDiscoveryResult(BaseModel):
     ports: List[PortInfo] = Field(default_factory=list, description="Discovered open ports")
     processes: List[ProcessInfo] = Field(default_factory=list, description="Running processes")
     applications: List[ApplicationDetection] = Field(default_factory=list, description="Detected applications")
+    os_info: Optional[Dict[str, Any]] = Field(None, description="Operating system information")
     discovery_time: datetime = Field(default_factory=datetime.utcnow, description="Discovery timestamp")
     errors: List[str] = Field(default_factory=list, description="Discovery errors")
     
@@ -461,7 +492,7 @@ class FleetReport(BaseModel):
     Aggregated report for a complete fleet validation run.
 
     Produced by ``FleetOrchestrator.run_fleet()`` and displayed by
-    ``BeeAIInteractiveCLI``.
+    ``InteractiveCLI``.
     """
     fleet_name: str
     started_at: datetime = Field(default_factory=datetime.utcnow)

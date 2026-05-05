@@ -212,3 +212,19 @@ classification_cache.json
 *.tmp
 *.temp
 .DS_Store
+
+# =============================================================================
+# Temporary/Demo Files (Not for Production)
+# =============================================================================
+CyberResValidation.pptx
+cyberres_demo_presentation.pptx
+cyberres_demo_presentation.py
+plan.md
+presentation.pptx
+presentation1.pptx
+python/demo-start.sh
+python/docker-compose.yml
+python/docker/
+python/infra_recovery_validation_ai/
+python/src/Dockerfile
+python/src/deploy.sh

@@ -78,7 +78,7 @@ class OverallEvaluation(BaseModel):
         return recs
 
 
-class BeeAIEvaluationAgent:
+class EvaluationAgent:
     """BeeAI-based agent for intelligent evaluation of validation results.
     
     This agent uses BeeAI's RequirementAgent to provide comprehensive evaluation
@@ -91,7 +91,7 @@ class BeeAIEvaluationAgent:
     - Trend Analysis: Tracks changes across multiple validation runs
     
     Example:
-        >>> agent = BeeAIEvaluationAgent(llm_model="ollama:llama3.2")
+        >>> agent = EvaluationAgent(llm_model="ollama:llama3.2")
         >>> evaluation = await agent.evaluate(
         ...     validation_result,
         ...     discovery_result=discovery,
@@ -632,6 +632,6 @@ Evaluation Process:
 
 
 # Backward compatibility alias
-EvaluationAgent = BeeAIEvaluationAgent
+EvaluationAgent = EvaluationAgent
 
 # Made with Bob

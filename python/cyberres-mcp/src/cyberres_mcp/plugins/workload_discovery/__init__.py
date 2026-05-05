@@ -6,6 +6,7 @@ Copyright contributors to the agentic-ai-cyberres project
 
 from typing import Dict, Any, Optional
 import logging
+import time
 
 from .os_detector import OSDetector
 from .app_detector import ApplicationDetector
@@ -23,13 +24,16 @@ logger = logging.getLogger("mcp.workload_discovery")
 
 def attach(mcp):
     """Register workload discovery tools onto the FastMCP instance."""
+    from mcp.types import ToolAnnotations
+
+    _ssh_read = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
     
     try:
         from ..utils import ok, err, resolve_ssh_auth
     except Exception:
         from plugins.utils import ok, err, resolve_ssh_auth  # type: ignore
     
-    @mcp.tool()
+    @mcp.tool(title="Discover OS Only", annotations=_ssh_read)
     def discover_os_only(
         host: str,
         ssh_user: Optional[str] = None,
@@ -114,7 +118,7 @@ def attach(mcp):
                 host=host
             )
     
-    @mcp.tool()
+    @mcp.tool(title="Discover Applications", annotations=_ssh_read)
     def discover_applications(
         host: str,
         ssh_user: Optional[str] = None,
@@ -205,12 +209,64 @@ def attach(mcp):
                     "valid": validation['valid_applications']
                 }
             )
+
+            # Convert application objects to dictionaries once so they can be
+            # reused for both response payload and port/process extraction.
+            app_dicts = [app.dict() for app in filtered_apps]
+
+            # Expose extracted ports/processes explicitly. This keeps the tool
+            # output directly consumable by downstream agents without requiring
+            # them to parse nested application objects.
+            ports = []
+            processes = []
+            seen_ports = set()
+            seen_processes = set()
+
+            for app in app_dicts:
+                app_name = app.get("name", "unknown")
+
+                for binding in app.get("network_bindings", []) or []:
+                    port = binding.get("port")
+                    if port is None:
+                        continue
+                    protocol = binding.get("protocol", "tcp")
+                    address = binding.get("address", "0.0.0.0")
+                    port_key = (port, protocol, address)
+                    if port_key in seen_ports:
+                        continue
+                    seen_ports.add(port_key)
+                    ports.append({
+                        "port": port,
+                        "protocol": protocol or "tcp",
+                        "service": app_name or "unknown",
+                        "state": binding.get("state") or "open",
+                        "banner": None,
+                    })
+
+                process_info = app.get("process_info") or {}
+                pid = process_info.get("pid")
+                if pid is None:
+                    continue
+                process_key = (pid, process_info.get("command", ""))
+                if process_key in seen_processes:
+                    continue
+                seen_processes.add(process_key)
+                processes.append({
+                    "pid": pid,
+                    "name": app_name or "unknown",
+                    "cmdline": process_info.get("command") or "",
+                    "user": process_info.get("user") or "unknown",
+                    "cpu_percent": None,
+                    "memory_mb": None,
+                })
             
             # Convert to dict for response
             result = {
                 "host": host,
                 "total_applications": len(filtered_apps),
-                "applications": [app.dict() for app in filtered_apps],
+                "applications": app_dicts,
+                "ports": ports,
+                "processes": processes,
                 "validation": validation,
                 "detection_summary": {
                     "total_detected": len(applications),
@@ -229,7 +285,7 @@ def attach(mcp):
                 host=host
             )
     
-    @mcp.tool()
+    @mcp.tool(title="Get Raw Server Data", annotations=_ssh_read)
     def get_raw_server_data(
         host: str,
         ssh_user: Optional[str] = None,
@@ -362,7 +418,7 @@ def attach(mcp):
                 host=host
             )
     
-    @mcp.tool()
+    @mcp.tool(title="Discover Workload", annotations=_ssh_read)
     def discover_workload(
         host: str,
         ssh_user: Optional[str] = None,
@@ -423,13 +479,90 @@ def attach(mcp):
             if auth_err:
                 return err(auth_err, code="INPUT_ERROR", host=host)
 
-            # Implementation will be completed in Sprint 4
-            return ok({
-                "message": "Full workload discovery not yet implemented",
-                "host": host,
-                "status": "pending_implementation",
-                "note": "Use discover_os_only and discover_applications separately. Full integrated discovery coming in Sprint 4."
-            })
+            from ...models import ConfidenceLevel, DiscoveryRequest
+            from ..ssh_utils import SSHExecutor
+
+            min_conf_map = {
+                "high": ConfidenceLevel.HIGH,
+                "medium": ConfidenceLevel.MEDIUM,
+                "low": ConfidenceLevel.LOW,
+                "uncertain": ConfidenceLevel.UNCERTAIN,
+            }
+            min_conf = min_conf_map.get(min_confidence.lower())
+            if min_conf is None:
+                return err(
+                    "min_confidence must be one of: high, medium, low, uncertain",
+                    code="INVALID_INPUT",
+                    host=host,
+                )
+
+            request = DiscoveryRequest(
+                host=host,
+                ssh_user=ssh_user,
+                ssh_password=ssh_password,
+                ssh_key_path=ssh_key_path,
+                ssh_port=ssh_port,
+                detect_os=detect_os,
+                detect_applications=detect_applications,
+                detect_containers=detect_containers,
+                scan_ports=scan_ports,
+                port_range=port_range,
+                timeout_seconds=timeout_seconds,
+                min_confidence=min_conf,
+            )
+
+            start_time = time.time()
+            os_info = None
+            applications = []
+            validation = None
+
+            logger.info("Starting workload discovery for %s", host)
+
+            if detect_os:
+                os_info = OSDetector().detect(request)
+
+            executor = None
+            try:
+                if detect_applications:
+                    executor = SSHExecutor(
+                        host=request.host,
+                        port=request.ssh_port,
+                        username=request.ssh_user or "",
+                        password=request.ssh_password,
+                        key_path=request.ssh_key_path,
+                        timeout=timeout_seconds,
+                    )
+                    app_detector = ApplicationDetector()
+                    detected_apps = app_detector.detect(request, executor.create_executor())
+                    applications = app_detector.confidence_scorer.filter_by_confidence(
+                        detected_apps,
+                        min_conf,
+                    )
+                    validation = app_detector.validate_detections(applications)
+            finally:
+                if executor is not None:
+                    executor.close()
+
+            discovery_result = ResultAggregator().aggregate(
+                request=request,
+                os_info=os_info,
+                applications=applications,
+                container_info=None,
+                start_time=start_time,
+            )
+            result = discovery_result.model_dump(mode="json")
+            if validation is not None:
+                result["validation"] = validation
+
+            logger.info(
+                "Workload discovery completed for %s",
+                host,
+                extra={
+                    "applications": len(applications),
+                    "duration_seconds": result["discovery_duration_seconds"],
+                },
+            )
+            return ok(result)
             
         except Exception as e:
             logger.error(f"Workload discovery failed for {host}", extra={"error": str(e)})

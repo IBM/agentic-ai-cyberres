@@ -133,6 +133,9 @@ def _classify_mongo_shell_error(stderr: str, stdout: str = "") -> Tuple[str, str
 def attach(mcp):
     """Register MongoDB tools onto the FastMCP instance."""
     logger = logging.getLogger("mcp.mongo")
+    from mcp.types import ToolAnnotations
+
+    _ssh_read = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
     try:
         from .utils import ok, err, resolve_ssh_auth, resolve_scoped_auth
     except Exception:
@@ -140,11 +143,11 @@ def attach(mcp):
         from plugins.utils import ok, err, resolve_ssh_auth, resolve_scoped_auth  # type: ignore
 
     def _resolve_ssh_auth_inputs(
-        ssh_user: str,
+        ssh_user: Optional[str],
         ssh_password: Optional[str],
         ssh_key_path: Optional[str],
         credential_id: Optional[str] = None,
-    ) -> Tuple[str, Optional[str], Optional[str], Optional[str]]:
+    ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
         resolved_user, resolved_password, resolved_key_path, auth_err = resolve_ssh_auth(
             ssh_user=ssh_user,
             ssh_password=ssh_password,
@@ -153,11 +156,20 @@ def attach(mcp):
             logger=logger,
         )
         return (
-            resolved_user or ssh_user,
+            resolved_user,
             resolved_password,
             resolved_key_path,
             auth_err,
         )
+
+    def _normalize_ssh_host(
+        ssh_host: Optional[str],
+        host: Optional[str],
+    ) -> Tuple[Optional[str], Optional[str]]:
+        resolved_host = ssh_host or host
+        if not resolved_host:
+            return None, "ssh_host or host is required"
+        return resolved_host, None
 
     def _resolve_optional_mongo_auth(
         credential_id: Optional[str],
@@ -376,7 +388,7 @@ def attach(mcp):
 
     def _db_mongo_connect_impl(
         ssh_host: str,
-        ssh_user: str,
+        ssh_user: Optional[str],
         ssh_password: Optional[str] = None,
         ssh_key_path: Optional[str] = None,
         credential_id: Optional[str] = None,
@@ -460,7 +472,7 @@ def attach(mcp):
 
     def _db_mongo_rs_status_impl(
         ssh_host: str,
-        ssh_user: str,
+        ssh_user: Optional[str],
         ssh_password: Optional[str] = None,
         ssh_key_path: Optional[str] = None,
         credential_id: Optional[str] = None,
@@ -534,81 +546,107 @@ def attach(mcp):
             "discovery": discovery,
         })
 
-    @mcp.tool()
+    @mcp.tool(title="MongoDB Connect", annotations=_ssh_read)
     def db_mongo_connect(
-        ssh_host: str,
-        ssh_user: str,
+        ssh_host: Optional[str] = None,
+        ssh_user: Optional[str] = None,
         ssh_password: Optional[str] = None,
         ssh_key_path: Optional[str] = None,
         credential_id: Optional[str] = None,
+        host: Optional[str] = None,
+        username: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """[MongoDB][SSH] Validate local MongoDB connectivity and return version/hello info."""
+        """[MongoDB][SSH] Validate local MongoDB connectivity and return version/hello info.
+
+        Prefer `host` + `credential_id` for agent calls. `ssh_host`/`ssh_user`
+        remain supported for backward compatibility.
+        """
+        resolved_host, host_err = _normalize_ssh_host(ssh_host, host)
+        if host_err:
+            return err(host_err, code="INPUT_ERROR")
         return _db_mongo_connect_impl(
-            ssh_host=ssh_host,
-            ssh_user=ssh_user,
+            ssh_host=resolved_host,
+            ssh_user=ssh_user or username,
             ssh_password=ssh_password,
             ssh_key_path=ssh_key_path,
             credential_id=credential_id,
         )
 
-    @mcp.tool()
+    @mcp.tool(title="MongoDB Replica Set Status", annotations=_ssh_read)
     def db_mongo_rs_status(
-        ssh_host: str,
-        ssh_user: str,
+        ssh_host: Optional[str] = None,
+        ssh_user: Optional[str] = None,
         ssh_password: Optional[str] = None,
         ssh_key_path: Optional[str] = None,
         credential_id: Optional[str] = None,
+        host: Optional[str] = None,
+        username: Optional[str] = None,
     ) -> Dict[str, Any]:
         """[MongoDB][SSH] Return replica-set status from the target VM."""
+        resolved_host, host_err = _normalize_ssh_host(ssh_host, host)
+        if host_err:
+            return err(host_err, code="INPUT_ERROR")
         return _db_mongo_rs_status_impl(
-            ssh_host=ssh_host,
-            ssh_user=ssh_user,
+            ssh_host=resolved_host,
+            ssh_user=ssh_user or username,
             ssh_password=ssh_password,
             ssh_key_path=ssh_key_path,
             credential_id=credential_id,
         )
 
-    @mcp.tool()
+    @mcp.tool(title="MongoDB SSH Ping (Alias)", annotations=_ssh_read)
     def db_mongo_ssh_ping(
-        ssh_host: str,
-        ssh_user: str,
+        ssh_host: Optional[str] = None,
+        ssh_user: Optional[str] = None,
         ssh_password: Optional[str] = None,
         ssh_key_path: Optional[str] = None,
         credential_id: Optional[str] = None,
+        host: Optional[str] = None,
+        username: Optional[str] = None,
     ) -> Dict[str, Any]:
         """[MongoDB][SSH][Alias] Backward-compatible alias for `db_mongo_connect`."""
+        resolved_host, host_err = _normalize_ssh_host(ssh_host, host)
+        if host_err:
+            return err(host_err, code="INPUT_ERROR")
         return _db_mongo_connect_impl(
-            ssh_host=ssh_host,
-            ssh_user=ssh_user,
+            ssh_host=resolved_host,
+            ssh_user=ssh_user or username,
             ssh_password=ssh_password,
             ssh_key_path=ssh_key_path,
             credential_id=credential_id,
         )
 
-    @mcp.tool()
+    @mcp.tool(title="MongoDB SSH RS Status (Alias)", annotations=_ssh_read)
     def db_mongo_ssh_rs_status(
-        ssh_host: str,
-        ssh_user: str,
+        ssh_host: Optional[str] = None,
+        ssh_user: Optional[str] = None,
         ssh_password: Optional[str] = None,
         ssh_key_path: Optional[str] = None,
         credential_id: Optional[str] = None,
+        host: Optional[str] = None,
+        username: Optional[str] = None,
     ) -> Dict[str, Any]:
         """[MongoDB][SSH][Alias] Backward-compatible alias for `db_mongo_rs_status`."""
+        resolved_host, host_err = _normalize_ssh_host(ssh_host, host)
+        if host_err:
+            return err(host_err, code="INPUT_ERROR")
         return _db_mongo_rs_status_impl(
-            ssh_host=ssh_host,
-            ssh_user=ssh_user,
+            ssh_host=resolved_host,
+            ssh_user=ssh_user or username,
             ssh_password=ssh_password,
             ssh_key_path=ssh_key_path,
             credential_id=credential_id,
         )
 
-    @mcp.tool(name="validate_collection")
+    @mcp.tool(name="validate_collection", title="MongoDB Validate Collection", annotations=_ssh_read)
     def db_mongo_ssh_validate_collection(
-        ssh_host: str,
-        ssh_user: str,
+        ssh_host: Optional[str] = None,
+        ssh_user: Optional[str] = None,
         ssh_password: Optional[str] = None,
         ssh_key_path: Optional[str] = None,
         credential_id: Optional[str] = None,
+        host: Optional[str] = None,
+        username: Optional[str] = None,
         db_name: str = "admin",
         collection: str = "",
         full: bool = True,
@@ -618,8 +656,12 @@ def attach(mcp):
         If `collection` is omitted, validates all non-system collections in `db_name`.
         """
 
+        resolved_host, host_err = _normalize_ssh_host(ssh_host, host)
+        if host_err:
+            return err(host_err, code="INPUT_ERROR")
+
         ssh_user, ssh_password, ssh_key_path, ssh_err = _resolve_ssh_auth_inputs(
-            ssh_user=ssh_user,
+            ssh_user=ssh_user or username,
             ssh_password=ssh_password,
             ssh_key_path=ssh_key_path,
             credential_id=credential_id,
@@ -632,7 +674,7 @@ def attach(mcp):
             return err(mongo_err, code="INPUT_ERROR")
 
         discovery = _discover_mongo_runtime_details(
-            ssh_host=ssh_host,
+            ssh_host=resolved_host,
             ssh_user=ssh_user,
             ssh_password=ssh_password,
             ssh_key_path=ssh_key_path,
@@ -663,7 +705,7 @@ def attach(mcp):
                 ")"
             )
             exec_res = _run_mongo_eval_via_ssh(
-                ssh_host=ssh_host,
+                ssh_host=resolved_host,
                 ssh_user=ssh_user,
                 ssh_password=ssh_password,
                 ssh_key_path=ssh_key_path,
@@ -731,7 +773,7 @@ def attach(mcp):
             ")"
         )
         list_exec = _run_mongo_eval_via_ssh(
-            ssh_host=ssh_host,
+            ssh_host=resolved_host,
             ssh_user=ssh_user,
             ssh_password=ssh_password,
             ssh_key_path=ssh_key_path,

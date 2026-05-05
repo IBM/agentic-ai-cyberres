@@ -13,14 +13,21 @@ from the validation request.
 
 from typing import Dict, Any, Optional, List, Tuple
 import logging
-import oracledb
 import re
 import shlex
+
+try:
+    import oracledb
+except ModuleNotFoundError:
+    oracledb = None  # type: ignore[assignment]
 
 
 def attach(mcp):
     """Register Oracle DB tools onto the FastMCP instance."""
     logger = logging.getLogger("mcp.oracle")
+    from mcp.types import ToolAnnotations
+
+    _ssh_read = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
     try:
         from .utils import ok, err, resolve_ssh_auth, resolve_scoped_auth
     except Exception:
@@ -29,6 +36,23 @@ def attach(mcp):
         from .mongo_db import run_ssh_command
     except Exception:
         from plugins.mongo_db import run_ssh_command  # type: ignore
+
+    def _make_dsn(host: str, port: int, service_name: Optional[str] = None, sid: Optional[str] = None) -> str:
+        if oracledb is not None:
+            if service_name:
+                return oracledb.makedsn(host, port, service_name=service_name)
+            return oracledb.makedsn(host, port, sid=sid)
+        if service_name:
+            return f"{host}:{port}/{service_name}"
+        return f"{host}:{port}/{sid or ''}"
+
+    def _require_oracledb():
+        if oracledb is None:
+            return err(
+                "Direct Oracle DB access requires installing the oracle extra: cyberres-mcp[oracle]",
+                code="OPTIONAL_DEPENDENCY_MISSING",
+            )
+        return None
 
     def _run_ssh_command_with_optional_sudo(
         ssh_host: str,
@@ -101,10 +125,8 @@ def attach(mcp):
         if ora_match:
             return f"Oracle query failed in SSH OS-auth mode: {ora_match.group(1)}"
         if "sqlplus: command not found" in err_lower:
-            return (
-                "SSH succeeded but sqlplus was not found for Oracle OS-auth. "
-                "Install Oracle client/server binaries or fix PATH/ORACLE_HOME for the SSH target user."
-            )
+            # Silently skip if sqlplus not found - Oracle may not be installed
+            return None
         if "no space left on device" in err_lower:
             return (
                 "SSH succeeded but remote filesystem is full (No space left on device). "
@@ -302,9 +324,7 @@ def attach(mcp):
                 if discovered_port == 1521:
                     candidate_dsns.append(f"{ssh_host}/{svc}")
                 else:
-                    candidate_dsns.append(
-                        oracledb.makedsn(ssh_host, discovered_port, service_name=svc)
-                    )
+                    candidate_dsns.append(_make_dsn(ssh_host, discovered_port, service_name=svc))
 
         if not candidate_dsns and discoveries["sids"]:
             sid = discoveries["sids"][0]
@@ -312,7 +332,7 @@ def attach(mcp):
                 if discovered_port == 1521:
                     candidate_dsns.append(f"{ssh_host}/{sid}")
                 else:
-                    candidate_dsns.append(oracledb.makedsn(ssh_host, discovered_port, sid=sid))
+                    candidate_dsns.append(_make_dsn(ssh_host, discovered_port, sid=sid))
 
         # Preserve order while deduplicating.
         deduped_dsns: List[str] = []
@@ -327,7 +347,7 @@ def attach(mcp):
             "candidate_dsns": deduped_dsns,
         }
 
-    @mcp.tool()
+    @mcp.tool(title="Oracle Connect (SSH)", annotations=_ssh_read)
     def db_oracle_connect(ssh_host: str,
                           ssh_user: str,
                           ssh_password: Optional[str] = None,
@@ -392,7 +412,7 @@ def attach(mcp):
             discovery=discovery.get("discoveries", {}),
         )
 
-    @mcp.tool()
+    @mcp.tool(title="Oracle Tablespaces (SSH)", annotations=_ssh_read)
     def db_oracle_tablespaces(ssh_host: str,
         ssh_user: str,
         ssh_password: Optional[str] = None,
@@ -489,7 +509,7 @@ def attach(mcp):
             discovery=discovery.get("discoveries", {}),
         )
 
-    @mcp.tool()
+    @mcp.tool(title="Oracle Data Validation (SSH)", annotations=_ssh_read)
     def db_oracle_data_validation(
         ssh_host: str,
         ssh_user: str,
@@ -803,7 +823,7 @@ def attach(mcp):
 
         return ok(response)
 
-    @mcp.tool()
+    @mcp.tool(title="Oracle Discover and Validate (SSH)", annotations=_ssh_read)
     def db_oracle_discover_and_validate(
         ssh_host: str,
         ssh_user: str,
@@ -840,6 +860,9 @@ def attach(mcp):
         # Keep discovery usable without DB creds; fail only if user is set but password missing.
         if oracle_auth_err and oracle_user:
             return err(oracle_auth_err, code="INPUT_ERROR")
+        missing_dep = _require_oracledb() if oracle_user and oracle_password else None
+        if missing_dep:
+            return missing_dep
 
         discovery = _discover_oracle_connection_details(
             ssh_host=ssh_host,
@@ -904,7 +927,7 @@ def attach(mcp):
 
         return ok(result)
 
-    @mcp.tool()
+    @mcp.tool(title="Oracle Discover Config (Direct DB)", annotations=_ssh_read)
     def db_oracle_discover_config(
         host: str,
         user: Optional[str] = None,
@@ -948,19 +971,22 @@ def attach(mcp):
             return err(auth_err, code="INPUT_ERROR")
         if not user or not password:
             return err("Provide Oracle user/password or credential_id with oracle credentials", code="INPUT_ERROR")
+        missing_dep = _require_oracledb()
+        if missing_dep:
+            return missing_dep
         
         try:
             # Build DSN - try service first, then SID, then attempt discovery
             dsn = None
             if service:
-                dsn = oracledb.makedsn(host, port, service_name=service)
+                dsn = _make_dsn(host, port, service_name=service)
             elif sid:
-                dsn = oracledb.makedsn(host, port, sid=sid)
+                dsn = _make_dsn(host, port, sid=sid)
             else:
                 # Try common service names
                 for svc in ["ORCL", "XE", "ORCLPDB1"]:
                     try:
-                        test_dsn = oracledb.makedsn(host, port, service_name=svc)
+                        test_dsn = _make_dsn(host, port, service_name=svc)
                         test_conn = oracledb.connect(user=user, password=password, dsn=test_dsn)
                         test_conn.close()
                         dsn = test_dsn

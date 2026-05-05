@@ -18,6 +18,14 @@ from typing import Optional, Dict, Any, Union, List
 from datetime import datetime
 from pathlib import Path
 
+# Import AgentTracker for structured console output
+try:
+    from agent_logging.agent_logger import AgentTracker as _AgentTrackerClass
+    _TRACKER_AVAILABLE = True
+except ImportError:
+    _AgentTrackerClass = None  # type: ignore[assignment,misc]
+    _TRACKER_AVAILABLE = False
+
 from pydantic import BaseModel, Field
 
 # BeeAI imports
@@ -26,6 +34,9 @@ from beeai_framework.backend.chat import ChatModel
 from beeai_framework.memory import SlidingMemory, SlidingMemoryConfig
 from beeai_framework.tools.mcp import MCPTool
 from mcp.client.stdio import StdioServerParameters, stdio_client
+
+# Dynamic MCP Integration
+from agents.mcp_dynamic import DynamicMCPClient
 
 # Local imports
 from models import (
@@ -43,9 +54,15 @@ from models import (
 from classifier import ApplicationClassifier
 
 # Import BeeAI agents
-from beeai_agents.discovery_agent import BeeAIDiscoveryAgent
-from beeai_agents.validation_agent import BeeAIValidationAgent, ValidationPlan
-from beeai_agents.evaluation_agent import BeeAIEvaluationAgent, OverallEvaluation
+from agents.discovery_agent import BeeAIDiscoveryAgent
+from agents.validation_agent import BeeAIValidationAgent, ValidationPlan
+from agents.evaluation_agent import EvaluationAgent, OverallEvaluation
+from agents.planning_metrics import (
+    PlanningMetricsAggregator,
+    PlanningMetricsSummary,
+    PlanningMetricsReporter,
+    get_global_aggregator
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +82,7 @@ class WorkflowResult(BaseModel):
     workflow_status: str = Field(..., description="success, partial_success, or failure")
     errors: list[str] = Field(default_factory=list)
     phase_timings: Dict[str, float] = Field(default_factory=dict)
+    planning_metrics: Optional[PlanningMetricsSummary] = Field(None, description="Planning phase metrics")
 
 
 class WorkflowState(BaseModel):
@@ -76,7 +94,7 @@ class WorkflowState(BaseModel):
     phase_start_time: float
 
 
-class BeeAIValidationOrchestrator:
+class ValidationOrchestrator:
     """BeeAI-powered orchestrator for complete validation workflow.
     
     This orchestrator coordinates three specialized BeeAI agents:
@@ -98,7 +116,7 @@ class BeeAIValidationOrchestrator:
     5. Evaluation: Assess results and provide recommendations
     
     Example:
-        >>> orchestrator = BeeAIValidationOrchestrator(
+        >>> orchestrator = ValidationOrchestrator(
         ...     mcp_server_path="python/cyberres-mcp",
         ...     llm_model="ollama:llama3.2"
         ... )
@@ -114,8 +132,8 @@ class BeeAIValidationOrchestrator:
         enable_ai_evaluation: bool = True,
         memory_size: int = 50
     ):
-        """Initialize BeeAI Validation Orchestrator.
-        
+        """Initialize Recovery Validation Orchestrator.
+
         Args:
             mcp_server_path: Path to MCP server directory
             llm_model: LLM model identifier
@@ -131,18 +149,21 @@ class BeeAIValidationOrchestrator:
         
         # Components (initialized on first use)
         self._mcp_client = None
-        self._mcp_tools = None
-        self._coordinator_agent = None
-        self._discovery_agent = None
-        self._validation_agent = None
-        self._evaluation_agent = None
-        self._classifier = None
+        self._mcp_tools: List[MCPTool] = []
+        self._coordinator_agent: Optional[RequirementAgent] = None
+        self._discovery_agent: Optional[BeeAIDiscoveryAgent] = None
+        self._validation_agent: Optional[BeeAIValidationAgent] = None
+        self._evaluation_agent: Optional[EvaluationAgent] = None
+        self._classifier: Optional[ApplicationClassifier] = None
+        
+        # Metrics tracking
+        self._metrics_aggregator = get_global_aggregator()
         
         # State tracking
         self._initialized = False
         
         logger.info(
-            f"BeeAI Validation Orchestrator created "
+            f"Recovery Validation Orchestrator created "
             f"(discovery: {enable_discovery}, evaluation: {enable_ai_evaluation})"
         )
     
@@ -155,8 +176,8 @@ class BeeAIValidationOrchestrator:
             logger.info("Orchestrator already initialized")
             return
         
-        logger.info("Initializing BeeAI Validation Orchestrator...")
-        
+        logger.info("Initializing Recovery Validation Orchestrator...")
+
         try:
             # Initialize MCP client and tools
             await self._initialize_mcp()
@@ -180,7 +201,7 @@ class BeeAIValidationOrchestrator:
             logger.info("Validation agent initialized")
             
             if self.enable_ai_evaluation:
-                self._evaluation_agent = BeeAIEvaluationAgent(
+                self._evaluation_agent = EvaluationAgent(
                     llm_model=self.llm_model,
                     memory_size=self.memory_size * 2  # Larger memory for evaluation
                 )
@@ -200,31 +221,51 @@ class BeeAIValidationOrchestrator:
     async def _initialize_mcp(self):
         """Initialize MCP client and discover tools."""
         logger.info(f"Connecting to MCP server at {self.mcp_server_path}...")
-        
-        # Create server parameters with logging suppressed
+
+        # Create server parameters — suppress MCP server subprocess logs.
+        import os as _os
+        import subprocess
         server_params = StdioServerParameters(
             command="uv",
             args=["--directory", str(self.mcp_server_path), "run", "cyberres-mcp"],
             env={
+                **_os.environ,           # inherit PATH, HOME, etc.
                 "MCP_TRANSPORT": "stdio",
                 "PYTHONUNBUFFERED": "1",
-                # Suppress MCP server logs by setting log level to ERROR
-                "LOGURU_LEVEL": "ERROR",
-                "MCP_LOG_LEVEL": "ERROR"
-            }
+                "LOG_LEVEL": "WARNING",  # read by server.py basicConfig
+                "LOGURU_LEVEL": "WARNING",
+                "FASTMCP_QUIET": "1",    # suppress FastMCP banner
+                # SSH host-key settings: trust unknown hosts so the MCP server
+                # can connect to VMs whose keys aren't in known_hosts yet.
+                # This is safe for internal infrastructure validation use cases.
+                "SSH_STRICT_HOST_KEY_CHECKING": "false",
+                "SSH_TRUST_UNKNOWN_HOSTS": "true",
+            },
         )
         
         # Connect to MCP server
         self._mcp_client = stdio_client(server_params)
         
         # Discover tools
-        self._mcp_tools = await MCPTool.from_client(self._mcp_client)
+        tools = await MCPTool.from_client(self._mcp_client)
+        self._mcp_tools = tools if tools is not None else []
         logger.info(f"✓ Connected to MCP server, discovered {len(self._mcp_tools)} tools")
         
         # Initialize tool executor
-        from beeai_agents.tool_executor import ToolExecutor
+        from agents.tool_executor import ToolExecutor
         self._tool_executor = ToolExecutor(self._mcp_tools, max_retries=3)
         logger.info("✓ Tool executor initialized")
+        
+        # ALSO initialize dynamic MCP client in parallel for future use
+        try:
+            self._dynamic_mcp_client = DynamicMCPClient(server_path=str(self.mcp_server_path))
+            await self._dynamic_mcp_client.connect()
+            await self._dynamic_mcp_client.discover_tools()
+            total_tools = len(self._dynamic_mcp_client.list_tools())
+            logger.info(f"✓ Dynamic MCP client also initialized: {total_tools} tools")
+        except Exception as e:
+            logger.warning(f"Dynamic MCP initialization failed (non-critical): {e}")
+            self._dynamic_mcp_client = None
     
     def _create_coordinator_agent(self) -> RequirementAgent:
         """Create coordinator agent for workflow management.
@@ -240,7 +281,7 @@ class BeeAIValidationOrchestrator:
         coordinator = RequirementAgent(
             llm=llm,
             memory=memory,
-            tools=[],  # Coordinator doesn't use tools directly
+            tools=[],  
             name="Workflow Coordinator",
             description="Coordinates multi-agent validation workflow",
             role="Workflow Orchestrator",
@@ -260,7 +301,8 @@ class BeeAIValidationOrchestrator:
         )
         
         logger.info("Coordinator agent created")
-    
+        return coordinator  
+
     def get_available_mcp_tools(self) -> List[str]:
         """Get list of available MCP tool names.
         
@@ -298,7 +340,6 @@ class BeeAIValidationOrchestrator:
                 "raw_data_collection": "get_raw_server_data" in available_tools
             }
         }
-        return coordinator
     
     async def execute_workflow(
         self,
@@ -328,6 +369,17 @@ class BeeAIValidationOrchestrator:
         
         phase_timings = {}
         errors = []
+
+        # ── AgentTracker for structured console output ────────────────────────
+        wf_tracker = None
+        if _TRACKER_AVAILABLE and _AgentTrackerClass is not None:
+            wf_tracker = _AgentTrackerClass(
+                "Orchestrator", resource=request.resource_info.host
+            )
+            wf_tracker.start(
+                f"Validation workflow for {request.resource_info.host} "
+                f"[{request.resource_info.resource_type.value}]"
+            )
         
         logger.info(f"Starting validation workflow for {request.resource_info.host}")
         logger.info(f"Resource type: {request.resource_info.resource_type.value}")
@@ -345,6 +397,12 @@ class BeeAIValidationOrchestrator:
                     logger.info("=" * 60)
                     logger.info("PHASE 1: Workload Discovery")
                     logger.info("=" * 60)
+                    if wf_tracker:
+                        wf_tracker.mode(
+                            "discovery",
+                            description="Scanning ports, processes and applications on the target host"
+                        )
+                        wf_tracker.info("Phase 1: Workload Discovery — scanning ports, processes, applications")
                     
                     discovery_result = await self._execute_discovery_phase(
                         request.resource_info
@@ -354,18 +412,54 @@ class BeeAIValidationOrchestrator:
                     state.completed_phases.append("discovery")
                     
                     # Classify resource based on discovery
-                    if discovery_result:
+                    if discovery_result and self._classifier is not None:
                         logger.info("Classifying resource based on discovery results...")
                         classification = self._classifier.classify(discovery_result)
                         logger.info(
                             f"✓ Resource classified as: {classification.category.value} "
                             f"(confidence: {classification.confidence:.2%})"
                         )
+                        if wf_tracker:
+                            wf_tracker.thinking(
+                                f"Detected {len(discovery_result.applications) if discovery_result else 0} "
+                                f"application(s) — classifying resource type..."
+                            )
+                            
+                            # Build classification reasoning
+                            reasoning_parts = [
+                                f"Classified as {classification.category.value} (confidence: {classification.confidence:.0%})"
+                            ]
+                            
+                            if classification.primary_application:
+                                reasoning_parts.append(
+                                    f"Primary application: {classification.primary_application.name}"
+                                )
+                                
+                                # Add evidence if available
+                                if classification.primary_application.evidence:
+                                    evidence = classification.primary_application.evidence
+                                    evidence_items = []
+                                    if 'ports' in evidence:
+                                        evidence_items.append(f"ports {evidence['ports']}")
+                                    if 'processes' in evidence:
+                                        evidence_items.append(f"processes: {evidence['processes']}")
+                                    if 'signatures' in evidence:
+                                        evidence_items.append(f"signatures matched")
+                                    
+                                    if evidence_items:
+                                        reasoning_parts.append(f"Evidence: {', '.join(evidence_items)}")
+                            
+                            wf_tracker.decision(
+                                " | ".join(reasoning_parts),
+                                confidence=classification.confidence,
+                            )
                     
                 except Exception as e:
                     error_msg = f"Discovery phase failed: {e}"
                     logger.error(error_msg)
                     errors.append(error_msg)
+                    if wf_tracker:
+                        wf_tracker.warning(f"Discovery failed: {e} — continuing with fallback plan")
                     phase_timings["discovery"] = time.time() - state.phase_start_time
             
             # Phase 2: Validation Planning
@@ -375,6 +469,12 @@ class BeeAIValidationOrchestrator:
             logger.info("=" * 60)
             logger.info("PHASE 2: Validation Planning")
             logger.info("=" * 60)
+            if wf_tracker:
+                wf_tracker.mode(
+                    "planning",
+                    description="Mapping detected workloads to the right validation checks"
+                )
+                wf_tracker.info("Phase 2: Validation Planning — building check list")
             
             validation_plan = await self._execute_planning_phase(
                 request.resource_info,
@@ -385,6 +485,11 @@ class BeeAIValidationOrchestrator:
             state.completed_phases.append("planning")
             
             logger.info(f"✓ Validation plan created with {len(validation_plan.checks)} checks")
+            if wf_tracker:
+                check_names = ", ".join(c.mcp_tool for c in validation_plan.checks)
+                wf_tracker.decision(
+                    f"Plan: {len(validation_plan.checks)} checks → {check_names}"
+                )
             
             # Phase 3: Validation Execution
             state.current_phase = "execution"
@@ -393,6 +498,12 @@ class BeeAIValidationOrchestrator:
             logger.info("=" * 60)
             logger.info("PHASE 3: Validation Execution")
             logger.info("=" * 60)
+            if wf_tracker:
+                wf_tracker.mode(
+                    "validation",
+                    description="Running checks and collecting results from the target host"
+                )
+                wf_tracker.info(f"Phase 3: Executing {len(validation_plan.checks)} validation checks")
             
             validation_result = await self._execute_validation_phase(
                 request,
@@ -408,6 +519,12 @@ class BeeAIValidationOrchestrator:
                 f"{validation_result.failed_checks} failed, "
                 f"{validation_result.warning_checks} warnings"
             )
+            if wf_tracker:
+                wf_tracker.info(
+                    f"Phase 3 done: ✅ {validation_result.passed_checks} passed  "
+                    f"❌ {validation_result.failed_checks} failed  "
+                    f"⚠️  {validation_result.warning_checks} warnings"
+                )
             
             # Phase 4: AI Evaluation (optional)
             evaluation = None
@@ -420,6 +537,12 @@ class BeeAIValidationOrchestrator:
                     logger.info("=" * 60)
                     logger.info("PHASE 4: AI Evaluation")
                     logger.info("=" * 60)
+                    if wf_tracker:
+                        wf_tracker.mode(
+                            "evaluation",
+                            description="Analysing results, identifying issues and generating recommendations"
+                        )
+                        wf_tracker.info("Phase 4: Evaluation — analysing results and generating recommendations")
                     
                     evaluation = await self._execute_evaluation_phase(
                         validation_result,
@@ -433,11 +556,20 @@ class BeeAIValidationOrchestrator:
                     logger.info(f"✓ Evaluation complete: {evaluation.overall_health}")
                     logger.info(f"  Critical issues: {len(evaluation.critical_issues)}")
                     logger.info(f"  Recommendations: {len(evaluation.recommendations)}")
+                    if wf_tracker:
+                        wf_tracker.thinking("Analysing check results, identifying root causes...")
+                        wf_tracker.decision(
+                            f"Health: {evaluation.overall_health.upper()}  "
+                            f"Issues: {len(evaluation.critical_issues)}  "
+                            f"Recommendations: {len(evaluation.recommendations)}"
+                        )
                     
                 except Exception as e:
                     error_msg = f"Evaluation phase failed: {e}"
                     logger.error(error_msg)
                     errors.append(error_msg)
+                    if wf_tracker:
+                        wf_tracker.warning(f"Evaluation failed: {e}")
                     phase_timings["evaluation"] = time.time() - state.phase_start_time
             
             # Determine workflow status
@@ -448,7 +580,21 @@ class BeeAIValidationOrchestrator:
             
             total_time = time.time() - state.start_time
             
-            # Create workflow result
+            # Create workflow result with planning metrics
+            planning_metrics_summary = None
+            if validation_plan and validation_plan.metrics:
+                planning_metrics_summary = PlanningMetricsSummary(
+                    planner_used=validation_plan.metrics.planner_used,
+                    planning_time_ms=validation_plan.metrics.planning_time_ms,
+                    llm_model=validation_plan.metrics.llm_model,
+                    num_checks=validation_plan.metrics.num_checks,
+                    num_priority_checks=validation_plan.metrics.num_priority_checks,
+                    tool_names=validation_plan.metrics.tool_names,
+                    fallback_reason=validation_plan.metrics.fallback_reason,
+                    resource_category=classification.category.value if classification else "unknown",
+                    timestamp=validation_plan.metrics.timestamp
+                )
+            
             result = WorkflowResult(
                 request=request,
                 discovery_result=discovery_result,
@@ -459,14 +605,35 @@ class BeeAIValidationOrchestrator:
                 execution_time_seconds=total_time,
                 workflow_status=workflow_status,
                 errors=errors,
-                phase_timings=phase_timings
+                phase_timings=phase_timings,
+                planning_metrics=planning_metrics_summary
             )
             
             logger.info("=" * 60)
             logger.info(f"WORKFLOW COMPLETE: {workflow_status.upper()}")
             logger.info(f"Total execution time: {total_time:.2f}s")
             logger.info(f"Completed phases: {', '.join(state.completed_phases)}")
+            
+            # Log planning metrics summary
+            if planning_metrics_summary:
+                logger.info("")
+                logger.info("Planning Metrics:")
+                logger.info(f"  Planner used: {planning_metrics_summary.planner_used}")
+                logger.info(f"  Planning time: {planning_metrics_summary.planning_time_ms}ms")
+                logger.info(f"  Checks generated: {planning_metrics_summary.num_checks}")
+                logger.info(f"  Priority checks: {planning_metrics_summary.num_priority_checks}")
+                if planning_metrics_summary.llm_model:
+                    logger.info(f"  LLM model: {planning_metrics_summary.llm_model}")
+                if planning_metrics_summary.fallback_reason:
+                    logger.info(f"  Fallback reason: {planning_metrics_summary.fallback_reason}")
+            
             logger.info("=" * 60)
+            if wf_tracker:
+                wf_tracker.finish(
+                    f"Workflow {workflow_status.upper()} — score: {validation_result.score}/100 "
+                    f"({total_time:.1f}s)",
+                    success=workflow_status in ("success", "partial_success"),
+                )
             
             return result
             
@@ -537,13 +704,18 @@ class BeeAIValidationOrchestrator:
         classification: Optional[ResourceClassification]
     ) -> ValidationPlan:
         """Execute validation planning phase.
-        
+
+        After the plan is created, every check's ``mcp_tool`` is validated
+        against the tools actually available on the MCP server.  Any check that
+        references a non-existent tool is removed and a warning is logged so the
+        problem is immediately visible in the console output.
+
         Args:
             resource: Resource information
             classification: Optional classification from discovery
-        
+
         Returns:
-            ValidationPlan with checks to execute
+            ValidationPlan with checks to execute (all tools verified)
         """
         # Create fallback classification if needed
         if not classification:
@@ -554,18 +726,68 @@ class BeeAIValidationOrchestrator:
                 reasoning="No discovery performed",
                 recommended_validations=["basic_connectivity", "system_health"]
             )
-        
-        # Use BeeAI validation agent for planning
+
+        # Use BeeAI validation agent for planning.
+        # Pass the live MCP tool catalog so the LLM can only pick tools that
+        # actually exist on the server — eliminates hallucinated tool names.
+        if self._validation_agent is None:
+            raise RuntimeError("Validation agent not initialized. Call initialize() first.")
         plan = await self._validation_agent.create_plan(
             resource,
-            classification
+            classification,
+            available_tools=self._mcp_tools if self._mcp_tools else None,
         )
-        
+
+        # ── Second-layer defence: verify every tool name exists on the MCP server ──
+        # This catches any future regression where a planner emits a wrong tool name.
+        available_tool_names: set[str] = {t.name for t in self._mcp_tools}
+        if available_tool_names:
+            valid_checks = []
+            for chk in plan.checks:
+                if chk.mcp_tool in available_tool_names:
+                    valid_checks.append(chk)
+                else:
+                    logger.warning(
+                        f"[PlanValidator] Dropping check '{chk.check_name}': "
+                        f"tool '{chk.mcp_tool}' not found on MCP server. "
+                        f"Available tools: {sorted(available_tool_names)}"
+                    )
+            if len(valid_checks) < len(plan.checks):
+                dropped = len(plan.checks) - len(valid_checks)
+                logger.warning(
+                    f"[PlanValidator] Dropped {dropped} check(s) with unknown tool names. "
+                    f"{len(valid_checks)} check(s) remain."
+                )
+                # Rebuild plan with only valid checks
+                plan = plan.model_copy(update={"checks": valid_checks})
+
+        # ── Record planning metrics ────────────────────────────────────────────
+        if plan.metrics:
+            # Convert ValidationAgent's PlanningMetrics to our PlanningMetricsSummary
+            metrics_summary = PlanningMetricsSummary(
+                planner_used=plan.metrics.planner_used,
+                planning_time_ms=plan.metrics.planning_time_ms,
+                llm_model=plan.metrics.llm_model,
+                num_checks=plan.metrics.num_checks,
+                num_priority_checks=plan.metrics.num_priority_checks,
+                tool_names=plan.metrics.tool_names,
+                fallback_reason=plan.metrics.fallback_reason,
+                resource_category=classification.category.value,
+                timestamp=plan.metrics.timestamp
+            )
+            self._metrics_aggregator.record_planning(metrics_summary)
+            
+            logger.info(f"✓ Planning metrics recorded:")
+            logger.info(f"  Planner: {metrics_summary.planner_used}")
+            logger.info(f"  Planning time: {metrics_summary.planning_time_ms}ms")
+            if metrics_summary.fallback_reason:
+                logger.info(f"  Fallback reason: {metrics_summary.fallback_reason}")
+
         logger.info(f"✓ Validation plan created:")
         logger.info(f"  Total checks: {len(plan.checks)}")
         logger.info(f"  Priority: {plan.priority}")
         logger.info(f"  Estimated time: {plan.estimated_execution_time}s")
-        
+
         return plan
     
     async def _execute_validation_phase(
@@ -587,18 +809,29 @@ class BeeAIValidationOrchestrator:
         start_time = time.time()
         checks = []
         
+        # Create tracker for structured, colour-coded console output
+        tracker = None
+        if _TRACKER_AVAILABLE and _AgentTrackerClass is not None:
+            tracker = _AgentTrackerClass("ValidationAgent", resource=request.resource_info.host)
+
         logger.info(f"Executing {len(plan.checks)} validation checks...")
-        
+        if tracker:
+            tracker.info(f"Running {len(plan.checks)} checks for {request.resource_info.host}")
+
         # Execute each check in the plan
         for i, check_def in enumerate(plan.checks, 1):
             try:
                 logger.info(f"  [{i}/{len(plan.checks)}] {check_def.check_name}...")
-                
+                if tracker:
+                    tracker.tool_call(check_def.mcp_tool, check_def.tool_args)
+
                 # Find matching MCP tool
                 tool = self._find_mcp_tool(check_def.mcp_tool)
-                
+
                 if not tool:
                     logger.warning(f"    Tool not found: {check_def.mcp_tool}")
+                    if tracker:
+                        tracker.warning(f"[{i}/{len(plan.checks)}] {check_def.check_name} — tool not found: {check_def.mcp_tool}")
                     checks.append(CheckResult(
                         check_id=check_def.check_id,
                         check_name=check_def.check_name,
@@ -606,14 +839,14 @@ class BeeAIValidationOrchestrator:
                         message=f"MCP tool not found: {check_def.mcp_tool}"
                     ))
                     continue
-                
+
                 # Execute tool with retry logic
                 try:
                     tool_result = await self._tool_executor.execute_with_retry(
                         check_def.mcp_tool,
                         check_def.tool_args
                     )
-                    
+
                     # Parse result into CheckResult
                     check_result = self._tool_executor.parse_check_result(
                         tool_result,
@@ -621,11 +854,36 @@ class BeeAIValidationOrchestrator:
                         expected_value=check_def.expected_result
                     )
                     checks.append(check_result)
-                    
-                    logger.info(f"    ✓ {check_result.status.value}")
-                    
+
+                    # Colour-coded result on console via tracker
+                    status_val = check_result.status.value
+                    msg = check_result.message or status_val
+                    if tracker:
+                        if check_result.status == ValidationStatus.PASS:
+                            tracker.tool_result(
+                                check_def.mcp_tool, tool_result,
+                                success=True,
+                                summary=f"[{i}/{len(plan.checks)}] {check_def.check_name} — ✅ PASS: {msg}"
+                            )
+                        elif check_result.status == ValidationStatus.WARNING:
+                            tracker.tool_result(
+                                check_def.mcp_tool, tool_result,
+                                success=True,
+                                summary=f"[{i}/{len(plan.checks)}] {check_def.check_name} — ⚠️  WARN: {msg}"
+                            )
+                        else:
+                            tracker.tool_result(
+                                check_def.mcp_tool, tool_result,
+                                success=False,
+                                summary=f"[{i}/{len(plan.checks)}] {check_def.check_name} — ❌ FAIL: {msg}"
+                            )
+                    else:
+                        logger.info(f"    ✓ {status_val}: {msg}")
+
                 except Exception as tool_error:
                     logger.error(f"    ✗ Tool execution error: {tool_error}")
+                    if tracker:
+                        tracker.error(f"[{i}/{len(plan.checks)}] {check_def.check_name} — tool error: {tool_error}")
                     check_result = CheckResult(
                         check_id=check_def.check_id,
                         check_name=check_def.check_name,
@@ -633,9 +891,11 @@ class BeeAIValidationOrchestrator:
                         message=f"Tool execution error: {str(tool_error)}"
                     )
                     checks.append(check_result)
-                
+
             except Exception as e:
                 logger.error(f"    ✗ Check failed: {e}")
+                if tracker:
+                    tracker.error(f"[{i}/{len(plan.checks)}] {check_def.check_name} — check failed: {e}")
                 checks.append(CheckResult(
                     check_id=check_def.check_id,
                     check_name=check_def.check_name,
@@ -773,11 +1033,66 @@ class BeeAIValidationOrchestrator:
         else:
             return "partial_success"
     
+    def get_metrics_aggregator(self) -> PlanningMetricsAggregator:
+        """Get the planning metrics aggregator.
+        
+        Returns:
+            PlanningMetricsAggregator instance
+        """
+        return self._metrics_aggregator
+    
+    def get_metrics_reporter(self) -> PlanningMetricsReporter:
+        """Get a metrics reporter for the current aggregator.
+        
+        Returns:
+            PlanningMetricsReporter instance
+        """
+        return PlanningMetricsReporter(self._metrics_aggregator)
+    
+    def print_planning_metrics_report(self) -> None:
+        """Print comprehensive planning metrics report to console."""
+        reporter = self.get_metrics_reporter()
+        reporter.print_report()
+    
+    def get_planning_metrics_summary(self) -> Dict[str, Any]:
+        """Get planning metrics summary as dictionary.
+        
+        Returns:
+            Dictionary with aggregated metrics
+        """
+        return self._metrics_aggregator.get_summary_dict()
+    
+    def export_planning_metrics(self, filepath: str, format: str = "json") -> None:
+        """Export planning metrics to file.
+        
+        Args:
+            filepath: Path to output file
+            format: Export format ('json' or 'csv')
+        """
+        reporter = self.get_metrics_reporter()
+        
+        if format.lower() == "json":
+            reporter.export_json(filepath)
+        elif format.lower() == "csv":
+            reporter.export_csv(filepath)
+        else:
+            raise ValueError(f"Unsupported format: {format}. Use 'json' or 'csv'.")
+        
+        logger.info(f"Planning metrics exported to {filepath} ({format})")
+    
     async def cleanup(self):
         """Cleanup resources and close connections."""
         logger.info("Cleaning up orchestrator resources...")
         
-        if self._mcp_client:
+        # Cleanup dynamic MCP client if it exists
+        if hasattr(self, '_dynamic_mcp_client') and self._dynamic_mcp_client:
+            try:
+                await self._dynamic_mcp_client.disconnect()
+                logger.info("✓ Dynamic MCP client disconnected")
+            except Exception as e:
+                logger.warning(f"Error disconnecting dynamic MCP client: {e}")
+        # Fallback to old MCP client if it exists
+        elif self._mcp_client:
             try:
                 # Close MCP client if needed
                 pass
@@ -789,6 +1104,6 @@ class BeeAIValidationOrchestrator:
 
 
 # Backward compatibility alias
-ValidationOrchestrator = BeeAIValidationOrchestrator
+ValidationOrchestrator = ValidationOrchestrator
 
 # Made with Bob

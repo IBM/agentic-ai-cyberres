@@ -12,6 +12,7 @@ from typing import Tuple, Callable, Optional
 import paramiko
 import logging
 import os
+import socket
 
 logger = logging.getLogger("mcp.ssh_utils")
 
@@ -150,7 +151,9 @@ class SSHExecutor:
             'hostname': self.host,
             'port': self.port,
             'username': self.username,
-            'timeout': self.connect_timeout
+            'timeout': self.connect_timeout,
+            'banner_timeout': self.connect_timeout,
+            'auth_timeout': self.connect_timeout,
         }
         
         if self.key_path:
@@ -158,18 +161,119 @@ class SSHExecutor:
             pkey = self._load_private_key(self.key_path)
             if pkey:
                 connect_kwargs['pkey'] = pkey
+                connect_kwargs['look_for_keys'] = False
+                connect_kwargs['allow_agent'] = False
                 logger.debug(f"Using private key from {self.key_path}")
             else:
                 # Fallback: let paramiko auto-detect key type
                 connect_kwargs['key_filename'] = self.key_path
+                connect_kwargs['look_for_keys'] = False
+                connect_kwargs['allow_agent'] = False
                 logger.debug(f"Using key_filename fallback for {self.key_path}")
         elif self.password:
             connect_kwargs['password'] = self.password
+            connect_kwargs['look_for_keys'] = False
+            connect_kwargs['allow_agent'] = False
             logger.debug(f"Using password authentication")
         
         logger.info(f"Connecting to {self.host}:{self.port} as {self.username}")
-        self._client.connect(**connect_kwargs)
-        logger.info(f"Successfully connected to {self.host}")
+        try:
+            self._client.connect(**connect_kwargs)
+            logger.info(f"Successfully connected to {self.host}")
+            return
+        except paramiko.AuthenticationException as ex:
+            allowed_types = list(getattr(ex, "allowed_types", []) or [])
+            if (
+                self.password
+                and not self.key_path
+                and any(auth_type == "keyboard-interactive" for auth_type in allowed_types)
+            ):
+                logger.warning(
+                    "Password authentication failed for %s; retrying with keyboard-interactive",
+                    self.host,
+                )
+                self.close()
+                self._client = self._connect_with_keyboard_interactive()
+                logger.info(f"Successfully connected to {self.host} via keyboard-interactive")
+                return
+            raise ex
+
+    def _connect_with_keyboard_interactive(self) -> paramiko.SSHClient:
+        """Establish an SSH connection using keyboard-interactive auth."""
+        if not self.password:
+            raise paramiko.AuthenticationException(
+                "Keyboard-interactive fallback requires a password"
+            )
+
+        strict_host_key_checking, trust_unknown_hosts, known_hosts_file = _ssh_security_config()
+        sock = socket.create_connection((self.host, self.port), timeout=self.connect_timeout)
+        transport = paramiko.Transport(sock)
+        transport.banner_timeout = self.connect_timeout
+        transport.auth_timeout = self.connect_timeout
+        transport.start_client(timeout=self.connect_timeout)
+
+        server_key = transport.get_remote_server_key()
+        client = paramiko.SSHClient()
+        client.load_system_host_keys()
+        if known_hosts_file:
+            try:
+                client.load_host_keys(known_hosts_file)
+            except Exception as ex:
+                logger.warning(f"Failed to load SSH known_hosts file '{known_hosts_file}': {ex}")
+
+        host_keys = client.get_host_keys()
+        server_identities = [self.host, f"[{self.host}]:{self.port}"]
+
+        if not trust_unknown_hosts and strict_host_key_checking:
+            known_identity_found = False
+            mismatched_identity = False
+            for server_identity in server_identities:
+                expected = host_keys.lookup(server_identity)
+                if not expected:
+                    continue
+                known_identity_found = True
+                if not host_keys.check(server_identity, server_key):
+                    mismatched_identity = True
+                    break
+            if mismatched_identity:
+                transport.close()
+                raise paramiko.SSHException(
+                    f"Host key verification failed for '{self.host}' during keyboard-interactive auth"
+                )
+            if not known_identity_found:
+                logger.debug(
+                    "No known_hosts entry found for %s during keyboard-interactive fallback; "
+                    "continuing because the initial SSH handshake already reached authentication",
+                    self.host,
+                )
+
+        def handler(title: str, instructions: str, prompts: list[tuple[str, bool]]) -> list[str]:
+            del title, instructions
+            responses: list[str] = []
+            for prompt, _echo in prompts:
+                prompt_lower = prompt.lower()
+                if "password" in prompt_lower or "passcode" in prompt_lower:
+                    responses.append(self.password or "")
+                else:
+                    responses.append("")
+            return responses
+
+        try:
+            transport.auth_interactive(self.username, handler)
+        except TypeError:
+            transport.auth_interactive(
+                self.username,
+                lambda _title, _instructions, prompts: handler("", "", prompts),
+            )
+
+        client._transport = transport
+        if trust_unknown_hosts:
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        elif strict_host_key_checking:
+            client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        else:
+            client.set_missing_host_key_policy(paramiko.WarningPolicy())
+        return client
     
     def _load_private_key(self, key_path: str) -> Optional[paramiko.PKey]:
         """
@@ -240,7 +344,18 @@ class SSHExecutor:
             if exit_code == 0:
                 logger.debug(f"Command completed successfully (exit code: {exit_code})")
             else:
-                logger.warning(f"Command failed with exit code {exit_code}")
+                stderr_preview = err.strip().replace("\n", " ")[:300]
+                logger.warning(
+                    "Command failed with exit code %s on %s%s",
+                    exit_code,
+                    self.host,
+                    f": {stderr_preview}" if stderr_preview else "",
+                    extra={
+                        "host": self.host,
+                        "exit_code": exit_code,
+                        "stderr_preview": stderr_preview,
+                    },
+                )
                 if err:
                     logger.debug(f"stderr: {err[:200]}")
             

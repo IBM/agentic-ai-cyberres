@@ -23,6 +23,8 @@ dependencies = [
     "ollama>=0.1.6",
     "mcp>=0.9.0",
     "sendgrid>=6.12.5",
+    "chainlit>=2.11.1",
+    "motor>=3.7.1",
 ]
 
 [build-system]
@@ -33,7 +35,8 @@ build-backend = "hatchling.build"
 packages = ["."]
 
 [project.scripts]
-validation-agent = "main:main"
+validation-agent = "cli:main"
+chainlit-app = "app:main"
 
 [tool.uv]
 dev-dependencies = [

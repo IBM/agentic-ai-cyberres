@@ -165,14 +165,27 @@ The LLM is used to interpret raw port/process/application data into a structured
 
 ### 3. Planning Agent (`beeai_agents/validation_agent.py`)
 
-**Mode**: Fully deterministic (no LLM)
+**Mode**: LLM-first with deterministic fallback
+
+The planning agent uses an intelligent **LLM-first with deterministic fallback** strategy:
+
+1. **LLM Planning (Primary)**: Uses BeeAI ReActAgent to create context-aware validation plans based on resource characteristics
+2. **Deterministic Fallback**: Falls back to rule-based planning if LLM fails or is unavailable
+3. **Credential Injection**: Always injects credentials deterministically (never by LLM)
 
 Maps `ResourceClassification.category` + detected applications to an exact list of `ValidationCheck` objects. Each check has:
 - `mcp_tool`: exact MCP tool name (validated against the live MCP server tool list)
 - `tool_args`: pre-populated dict including SSH credentials from the resource object
 - `priority`, `check_name`, `expected_result`, `failure_impact`
 
-**Why no LLM here**: LLMs proved unreliable at (a) picking valid tool names and (b) injecting SSH credentials into every tool_args dict. Deterministic mapping eliminates both failure modes.
+**Design Decision**: The system attempts LLM-based planning first for intelligent, context-aware validation strategies. However, credentials are ALWAYS injected deterministically to prevent LLM hallucination issues with sensitive data. If LLM planning fails, the system seamlessly falls back to deterministic planning.
+
+📖 **See [LLM Planning Guide](beeai_agents/LLM_PLANNING_GUIDE.md) for comprehensive documentation on:**
+- How LLM planning works
+- Configuration options
+- Metrics and monitoring
+- Troubleshooting
+- Best practices
 
 #### Check plans by resource category
 

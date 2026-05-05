@@ -9,7 +9,7 @@ Interactive command-line interface for validating infrastructure resources.
 Credentials are loaded from config/secrets.json — no passwords in prompts.
 
 Usage:
-    python beeai_interactive.py
+    python cli.py
 
 Prompt examples (no credentials needed in prompt):
     "Validate VM at 192.168.1.100"
@@ -40,9 +40,11 @@ from agent_logging.agent_logger import setup_logging, AgentTracker, WorkflowProg
 log_file = setup_logging(
     log_dir="logs",
     log_level="DEBUG",
-    console_level="INFO",
-    log_file_prefix="beeai",
+    console_level="WARNING",  # Only show warnings and errors on console
+    log_file_prefix="validation-agent",
     suppress_noisy_loggers=True,
+    transform_logs=True,  # Transform technical logs to agent narratives
+    agent_name="Agent",
 )
 
 import logging
@@ -66,7 +68,7 @@ if telemetry_enabled:
     enable_console = os.getenv("TELEMETRY_CONSOLE", "false").lower() == "true"
     
     success = initialize_telemetry(
-        service_name="beeai-validation",
+        service_name="validation-service",
         phoenix_endpoint=phoenix_endpoint,
         enable_console_export=enable_console,
     )
@@ -90,7 +92,7 @@ try:
 except ImportError:
     pass  # dotenv is optional; env vars may already be set
 
-from beeai_agents.orchestrator import BeeAIValidationOrchestrator
+from agents.orchestrator import ValidationOrchestrator
 from models import (
     ValidationRequest,
     ValidationReport,
@@ -183,7 +185,7 @@ class FleetProgressDisplay:
         print("\n".join(lines))
 
 
-class BeeAIInteractiveCLI:
+class InteractiveCLI:
     """
     Interactive CLI for BeeAI validation workflow.
 
@@ -195,7 +197,7 @@ class BeeAIInteractiveCLI:
     """
 
     def __init__(self):
-        self.orchestrator: BeeAIValidationOrchestrator | None = None
+        self.orchestrator: ValidationOrchestrator | None = None
         self.initialized = False
         self.email_service: EmailService | None = None
         self.credential_resolver = CredentialResolver(
@@ -248,7 +250,7 @@ class BeeAIInteractiveCLI:
 
         try:
             with self.tracker.phase("initialization", "Loading LLM and MCP tools"):
-                self.orchestrator = BeeAIValidationOrchestrator(
+                self.orchestrator = ValidationOrchestrator(
                     mcp_server_path="../cyberres-mcp",
                     llm_model="ollama:llama3.2",
                     enable_discovery=True,
@@ -492,19 +494,44 @@ class BeeAIInteractiveCLI:
 
         exec_tracker = AgentTracker("Orchestrator")
 
-        # Main validation workflow span
+        # Main validation workflow span with input/output capture
         with trace_operation(
             "validation_workflow",
-            attributes={
-                "prompt": prompt[:100],  # First 100 chars
+            span_kind="INTERNAL",
+            input_data={
+                "prompt": prompt[:200],  # First 200 chars
                 "timestamp": datetime.now().isoformat(),
+            },
+            attributes={
+                "workflow.type": "validation",
+                "workflow.version": "1.0",
             }
-        ):
+        ) as workflow_root_span:
             try:
                 # Step 1: Parse prompt — extract host and credential ID
-                with trace_operation("parse_prompt", {"prompt": prompt}):
+                with trace_operation(
+                    "parse_prompt",
+                    span_kind="INTERNAL",
+                    input_data={"prompt": prompt},
+                    attributes={"step": "1_parse"}
+                ) as parse_span:
+                    if parse_span:
+                        parse_span.add_event("parsing_started", {"timestamp": datetime.now().isoformat()})
+                    
                     exec_tracker.decision("Parsing prompt to identify target host")
                     info, email_address = self.parse_prompt(prompt)
+                    
+                    # Capture parse output
+                    if parse_span:
+                        parse_span.add_event("parsing_completed", {
+                            "host_found": info['host'],
+                            "has_email": bool(email_address)
+                        })
+                        parse_span.set_output({
+                            "host": info['host'],
+                            "credential_id": info.get("credential_id"),
+                            "email": email_address,
+                        })
 
                 print(f"\n  ✅ Understood:")
                 print(f"     Target : {info['host']}")
@@ -517,10 +544,33 @@ class BeeAIInteractiveCLI:
                 # Step 2: Resolve credentials + build Pydantic model
                 with trace_operation(
                     "resolve_credentials",
-                    attributes={"host": info['host']}
-                ):
+                    span_kind="INTERNAL",
+                    input_data={"host": info['host'], "credential_id": info.get("credential_id")},
+                    attributes={"step": "2_credentials"}
+                ) as cred_span:
+                    if cred_span:
+                        cred_span.add_event("credential_resolution_started", {
+                            "host": info['host']
+                        })
+                    
                     request = await self._resolve_and_build_request(info)
                     resource = request.resource_info
+                    
+                    # Capture credential resolution output
+                    if cred_span:
+                        # VMResourceInfo has ssh_user, ssh_password, ssh_key_path (not ssh_credentials)
+                        has_creds = bool(
+                            hasattr(resource, 'ssh_user') and resource.ssh_user and
+                            (getattr(resource, 'ssh_password', None) or getattr(resource, 'ssh_key_path', None))
+                        )
+                        cred_span.add_event("credentials_resolved", {
+                            "has_credentials": has_creds,
+                            "credential_source": str(request.credential_source)
+                        })
+                        cred_span.set_output({
+                            "host": resource.host,
+                            "has_credentials": has_creds,
+                        })
 
                 # Show workflow progress
                 progress = WorkflowProgressDisplay(resource.host)
@@ -533,25 +583,77 @@ class BeeAIInteractiveCLI:
                 if self.orchestrator is None:
                     raise RuntimeError("Orchestrator not initialised")
                 
-                # Wrap the entire workflow execution
+                # Wrap the entire workflow execution with rich input/output
                 with trace_operation(
                     "execute_workflow",
-                    attributes={
+                    span_kind="INTERNAL",
+                    input_data={
                         "host": resource.host,
                         "auto_discover": request.auto_discover,
+                        "credential_source": request.credential_source,
+                    },
+                    attributes={
+                        "step": "3_execute",
+                        "resource.type": str(resource.resource_type),
+                        "workflow.auto_discover": str(request.auto_discover),
                     }
                 ) as workflow_span:
+                    if workflow_span:
+                        workflow_span.add_event("workflow_execution_started", {
+                            "host": resource.host,
+                            "auto_discover": request.auto_discover
+                        })
+                    
                     result = await self.orchestrator.execute_workflow(request)
                     elapsed = __import__("time").time() - start_time
                     
-                    # Add workflow results to span
+                    # Add workflow results to span with structured output
                     if workflow_span:
+                        workflow_span.add_event("workflow_execution_completed", {
+                            "status": result.workflow_status,
+                            "score": result.validation_result.score,
+                            "elapsed_seconds": round(elapsed, 2)
+                        })
+                        
                         workflow_span.set_attribute("workflow_status", result.workflow_status)
                         workflow_span.set_attribute("score", result.validation_result.score)
                         workflow_span.set_attribute("elapsed_seconds", elapsed)
                         workflow_span.set_attribute("passed_checks", result.validation_result.passed_checks)
                         workflow_span.set_attribute("failed_checks", result.validation_result.failed_checks)
                         workflow_span.set_attribute("warning_checks", result.validation_result.warning_checks)
+                        
+                        # Add phase completion events
+                        for phase, timing in result.phase_timings.items():
+                            workflow_span.add_event(f"phase_{phase}_completed", {
+                                "duration_seconds": round(timing, 2),
+                                "has_errors": phase in result.errors
+                            })
+                        
+                        # Set structured output for Phoenix UI
+                        workflow_span.set_output({
+                            "workflow_status": result.workflow_status,
+                            "validation_result": {
+                                "score": result.validation_result.score,
+                                "passed_checks": result.validation_result.passed_checks,
+                                "failed_checks": result.validation_result.failed_checks,
+                                "warning_checks": result.validation_result.warning_checks,
+                            },
+                            "elapsed_seconds": round(elapsed, 2),
+                            "phase_timings": {k: round(v, 2) for k, v in result.phase_timings.items()},
+                        })
+                
+                # Set final workflow output
+                if workflow_root_span:
+                    workflow_root_span.set_output({
+                        "status": result.workflow_status,
+                        "score": result.validation_result.score,
+                        "total_checks": (
+                            result.validation_result.passed_checks +
+                            result.validation_result.failed_checks +
+                            result.validation_result.warning_checks
+                        ),
+                        "elapsed_seconds": round(elapsed, 2),
+                    })
 
                 # Update progress display
                 for phase, timing in result.phase_timings.items():
@@ -569,8 +671,15 @@ class BeeAIInteractiveCLI:
 
                 # Send email report if requested
                 if email_address:
-                    with trace_operation("send_email_report", {"email": email_address}):
+                    with trace_operation(
+                        "send_email_report",
+                        span_kind="CLIENT",
+                        input_data={"email": email_address, "score": result.validation_result.score},
+                        attributes={"step": "4_email", "email.recipient": email_address}
+                    ) as email_span:
                         await self._send_email_report(result, request, email_address)
+                        if email_span:
+                            email_span.set_output({"status": "sent", "recipient": email_address})
 
                 # Flush traces to Phoenix immediately after validation
                 if is_telemetry_enabled():
@@ -627,7 +736,7 @@ class BeeAIInteractiveCLI:
                     "failed":  "  ❌",
                     "warning": "  ⚠️ ",
                     "error":   "  🔴",
-                }.get(check.status.value, "  ❓")
+                }.get(check.status.value, "  ℹ️ ")
 
                 print(f"{icon} {check.check_name}")
                 if check.message:
@@ -946,7 +1055,7 @@ class BeeAIInteractiveCLI:
         """Display help text."""
         print("""
   ╔══════════════════════════════════════════════════════════════╗
-  ║  BeeAI Validation Agent — Help                               ║
+  ║  Recovery Validation Agent — Help                            ║
   ╠══════════════════════════════════════════════════════════════╣
   ║  COMMANDS                                                    ║
   ║    list credentials  — Show available credentials            ║
@@ -984,7 +1093,7 @@ class BeeAIInteractiveCLI:
 
 async def main():
     """Main entry point."""
-    cli = BeeAIInteractiveCLI()
+    cli = InteractiveCLI()
     await cli.run()
 
 
@@ -998,5 +1107,10 @@ if __name__ == "__main__":
         print(f"\n  ❌ Fatal error: {e}")
         logger.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)
+    finally:
+        # Ensure telemetry is properly shut down to flush remaining spans
+        if is_telemetry_enabled():
+            logger.debug("Shutting down telemetry...", extra={"agent": "System"})
+            shutdown_telemetry(timeout=5)
 
 # Made with Bob
