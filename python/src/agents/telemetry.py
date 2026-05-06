@@ -198,3 +198,96 @@ def trace_agent_operation(operation_name: str):
     return decorator
 
 # Made with Bob
+
+
+# ============================================================================
+# Standalone Functions for CLI Compatibility
+# ============================================================================
+
+def initialize_telemetry(
+    service_name: str = "validation-service",
+    phoenix_endpoint: Optional[str] = None,
+    enable_console_export: bool = False
+) -> bool:
+    """
+    Initialize global telemetry instance.
+    
+    Args:
+        service_name: Name of the service
+        phoenix_endpoint: Phoenix OTLP endpoint URL
+        enable_console_export: Whether to enable console export (not used with Phoenix)
+    
+    Returns:
+        True if initialization succeeded, False otherwise
+    """
+    global _telemetry
+    try:
+        _telemetry = BeeAITelemetry(
+            service_name=service_name,
+            otlp_endpoint=phoenix_endpoint,
+            enabled=True
+        )
+        _telemetry.initialize()
+        return _telemetry.enabled
+    except Exception as e:
+        print(f"⚠️  Telemetry initialization failed: {e}")
+        return False
+
+
+def shutdown_telemetry(timeout: int = 5):
+    """Shutdown global telemetry instance."""
+    global _telemetry
+    if _telemetry:
+        _telemetry.shutdown()
+
+
+def flush_telemetry(timeout: int = 5):
+    """Flush pending telemetry spans."""
+    global _telemetry
+    if _telemetry and _telemetry.provider:
+        try:
+            _telemetry.provider.force_flush(timeout_millis=timeout * 1000)
+        except Exception as e:
+            print(f"⚠️  Telemetry flush error: {e}")
+
+
+def is_telemetry_enabled() -> bool:
+    """Check if telemetry is enabled."""
+    global _telemetry
+    return _telemetry is not None and _telemetry.enabled
+
+
+def trace_operation(
+    operation_name: str,
+    attributes: Optional[dict] = None,
+    span_kind: Optional[str] = None,
+    input_data: Optional[dict] = None,
+    **kwargs
+):
+    """
+    Context manager for tracing operations (standalone function version).
+    
+    Args:
+        operation_name: Name of the operation
+        attributes: Additional attributes
+        span_kind: Type of span (INTERNAL, CLIENT, SERVER, etc.) - for compatibility
+        input_data: Input data to record - merged into attributes
+        **kwargs: Additional keyword arguments (ignored for compatibility)
+    
+    Returns:
+        Context manager for tracing
+    """
+    global _telemetry
+    if _telemetry:
+        # Merge input_data into attributes if provided
+        merged_attributes = attributes or {}
+        if input_data:
+            merged_attributes.update({f"input.{k}": v for k, v in input_data.items()})
+        if span_kind:
+            merged_attributes["span.kind"] = span_kind
+        
+        return _telemetry.trace_operation(operation_name, merged_attributes)
+    else:
+        # Return a no-op context manager if telemetry not initialized
+        from contextlib import nullcontext
+        return nullcontext()

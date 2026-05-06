@@ -96,7 +96,10 @@ def attach(mcp):
             "if command -v sqlplus >/dev/null 2>&1; then SQLPLUS_BIN=$(command -v sqlplus); "
             "elif [ -n \"$ORACLE_HOME\" ] && [ -x \"$ORACLE_HOME/bin/sqlplus\" ]; then SQLPLUS_BIN=\"$ORACLE_HOME/bin/sqlplus\"; "
             "else SQLPLUS_BIN=$(find /u01 /opt /usr -type f -name sqlplus 2>/dev/null | head -n 1); fi; "
-            "if [ -z \"$SQLPLUS_BIN\" ]; then echo \"sqlplus: command not found\" >&2; exit 127; fi; "
+            "if [ -z \"$SQLPLUS_BIN\" ]; then "
+            "echo \"CYBERRES_ORACLE_SQLPLUS_MISSING: sqlplus was not found on the remote host for the SSH user\" >&2; "
+            "exit 0; "
+            "fi; "
             "if [ -z \"$ORACLE_HOME\" ]; then ORACLE_HOME=$(dirname \"$(dirname \"$SQLPLUS_BIN\")\"); export ORACLE_HOME; fi; "
             "if [ -n \"$ORACLE_HOME\" ]; then export PATH=\"$ORACLE_HOME/bin:$PATH\"; export LD_LIBRARY_PATH=\"$ORACLE_HOME/lib:${LD_LIBRARY_PATH:-}\"; fi; "
             "if [ -z \"$ORACLE_SID\" ]; then "
@@ -124,9 +127,12 @@ def attach(mcp):
         ora_match = re.search(r"(ORA-\d{5}:[^\n\r]*)", combined)
         if ora_match:
             return f"Oracle query failed in SSH OS-auth mode: {ora_match.group(1)}"
-        if "sqlplus: command not found" in err_lower:
-            # Silently skip if sqlplus not found - Oracle may not be installed
-            return None
+        if "cyberres_oracle_sqlplus_missing" in err_lower or "sqlplus: command not found" in err_lower:
+            return (
+                "SSH succeeded but Oracle sqlplus was not found on the remote host. "
+                "Install Oracle Client/database tools, set ORACLE_HOME/PATH for the SSH user, "
+                "or run the tool with sudo_oracle=true if sqlplus is only available to the oracle OS user."
+            )
         if "no space left on device" in err_lower:
             return (
                 "SSH succeeded but remote filesystem is full (No space left on device). "
@@ -141,6 +147,16 @@ def attach(mcp):
             "SSH connection succeeded, but Oracle OS-auth query failed. "
             "Try sudo_oracle=true and verify Oracle environment for the remote user."
         )
+
+    def _ssh_os_auth_error_code(stderr: str, stdout: str = "") -> str:
+        combined = f"{stderr}\n{stdout}".lower()
+        if "cyberres_oracle_sqlplus_missing" in combined or "sqlplus: command not found" in combined:
+            return "ORACLE_SQLPLUS_MISSING"
+        if "no space left on device" in combined:
+            return "REMOTE_FILESYSTEM_FULL"
+        if "sp2-0667" in combined or "sp2-0750" in combined:
+            return "ORACLE_ENV_INCOMPLETE"
+        return "ORACLE_ERROR"
 
     def _resolve_ssh_auth_inputs(
         ssh_user: str,
@@ -405,7 +421,7 @@ def attach(mcp):
             })
         return err(
             _build_ssh_os_auth_error_message(stderr, out),
-            code="ORACLE_ERROR",
+            code=_ssh_os_auth_error_code(stderr, out),
             rc=rc,
             stderr=stderr,
             stdout=out,
@@ -502,7 +518,7 @@ def attach(mcp):
             })
         return err(
             _build_ssh_os_auth_error_message(stderr, out),
-            code="ORACLE_ERROR",
+            code=_ssh_os_auth_error_code(stderr, out),
             rc=rc,
             stderr=stderr,
             stdout=out,
@@ -584,7 +600,7 @@ def attach(mcp):
         if not core_rows:
             return err(
                 _build_ssh_os_auth_error_message(stderr, out),
-                code="ORACLE_ERROR",
+                code=_ssh_os_auth_error_code(stderr, out),
                 rc=rc,
                 stderr=stderr,
                 stdout=out,

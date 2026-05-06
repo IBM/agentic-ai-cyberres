@@ -1,28 +1,31 @@
 """
 Recovery Validation Agent — LLM-Based Validation Planning with Deterministic Fallback
 
-Creates validation plans using BeeAI ReActAgent for intelligent planning with
-fallback to deterministic mapping when LLM fails.
+Creates validation plans using structured LLM output (JSON mode) for intelligent
+planning with fallback to deterministic mapping when LLM fails.
 
 Key design decisions:
-- **LLM-first planning** — Uses BeeAI ReActAgent with MCP tools for intelligent
-  validation planning based on resource context and criticality.
+- **Structured output planning** — Uses direct LLM calls with JSON mode/Pydantic
+  models for reliable, schema-compliant validation plans.
 - **Deterministic fallback** — Falls back to rule-based planning if LLM fails,
   ensuring reliability.
 - **Credentials injection** — SSH credentials are injected deterministically after
   plan generation to avoid LLM hallucination issues.
 - **Planning metrics** — Tracks planning quality, LLM vs fallback usage, and
   execution success rates.
-- **Minimal constraints** — Lets LLM reason independently about tool selection
-  and check prioritization.
+- **Configurable modes** — Supports structured, react, or deterministic planning
+  via LLM_PLANNING_MODE environment variable.
 """
 
 import logging
 import time
+import json
+import os
+import asyncio
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 # BeeAI imports
 from beeai_framework.agents.react.agent import ReActAgent
@@ -31,7 +34,14 @@ from beeai_framework.memory import SlidingMemory, SlidingMemoryConfig
 from beeai_framework.tools.mcp import MCPTool
 
 # Output management imports
-from agents.output import OutputManager, VerbosityLevel
+from agents.output import OutputManager, VerbosityLevel, AgentResponseParser
+
+# Planning models
+from agents.planning_models import (
+    ValidationPlanSchema,
+    ValidationCheckSchema,
+    PlanningContext
+)
 
 # Local imports
 from models import (
@@ -176,6 +186,9 @@ Create a validation plan with checks that include:
 - failure_impact: Impact if check fails
 """
     
+    # Planning mode configuration
+    PLANNING_MODE = os.getenv("LLM_PLANNING_MODE", "structured").lower()  # structured, react, deterministic
+    
     def __init__(
         self,
         llm_model: str = "ollama:llama3.2",
@@ -198,6 +211,9 @@ Create a validation plan with checks that include:
         
         # Planning agent will be created on first use
         self._planning_agent: Optional[ReActAgent] = None
+        
+        # Response parser for extracting text from agent responses
+        self._parser = AgentResponseParser()
         
         # Metrics tracking
         self._planning_stats = {
@@ -271,16 +287,33 @@ Create a validation plan with checks that include:
         if available_tools and not self.mcp_tools:
             self.mcp_tools = available_tools
 
-        # ── Try LLM planning first ────────────────────────────────────────────
+        # ── Try LLM planning first (based on mode) ────────────────────────────
         plan = None
         fallback_reason = None
         
-        if self.mcp_tools:
+        # Check planning mode
+        planning_mode = self.PLANNING_MODE
+        logger.info(f"[Planner] Planning mode: {planning_mode}")
+        
+        if planning_mode == "deterministic":
+            # Skip LLM planning entirely
+            fallback_reason = "Deterministic mode configured"
+            logger.info("[Planner] Deterministic mode - skipping LLM planning")
+        elif self.mcp_tools:
             try:
-                logger.info("[Planner] Attempting LLM-based validation planning")
-                plan = await self._create_llm_plan(resource, classification)
-                self._planning_stats["llm_plans"] += 1
-                logger.info("[Planner] LLM planning succeeded")
+                if planning_mode == "structured":
+                    logger.info("[Planner] Attempting structured LLM-based validation planning")
+                    plan = await self._create_llm_plan_structured(resource, classification)
+                    self._planning_stats["llm_plans"] += 1
+                    logger.info("[Planner] Structured LLM planning succeeded")
+                elif planning_mode == "react":
+                    logger.info("[Planner] Attempting ReAct LLM-based validation planning")
+                    plan = await self._create_llm_plan(resource, classification)
+                    self._planning_stats["llm_plans"] += 1
+                    logger.info("[Planner] ReAct LLM planning succeeded")
+                else:
+                    fallback_reason = f"Unknown planning mode: {planning_mode}"
+                    logger.warning(f"[Planner] {fallback_reason}")
             except Exception as e:
                 fallback_reason = f"LLM planning failed: {str(e)}"
                 logger.warning(
@@ -423,6 +456,314 @@ Remember: Follow the ReAct format strictly - each Thought must be followed by ei
         Returns:
             Formatted tool list string
         """
+        tool_lines = []
+        for tool in self.mcp_tools:
+            tool_name = tool.name
+            tool_desc = getattr(tool, 'description', 'No description')
+            tool_lines.append(f"  - {tool_name}: {tool_desc}")
+        
+        return "\n".join(tool_lines[:20])  # Limit to first 20 tools
+    
+    async def _create_llm_plan_structured(
+        self,
+        resource: ResourceInfo,
+        classification: ResourceClassification
+    ) -> ValidationPlan:
+        """Create validation plan using structured LLM output (JSON mode).
+        
+        This method uses direct ChatModel calls with JSON mode to generate
+        schema-compliant validation plans. This approach is more reliable than
+        ReActAgent for structured output generation.
+        
+        Args:
+            resource: Resource information
+            classification: Resource classification
+        
+        Returns:
+            ValidationPlan created by LLM with structured output
+        
+        Raises:
+            Exception: If LLM planning fails
+        """
+        logger.info("[Planner] Starting structured LLM-based validation planning")
+        
+        # Build context for planning
+        context = PlanningContext(
+            host=resource.host,
+            resource_type=resource.resource_type.value,
+            category=classification.category.value,
+            primary_application=classification.primary_application.name if classification.primary_application else None,
+            secondary_applications=[app.name for app in classification.secondary_applications],
+            available_tools=[tool.name for tool in self.mcp_tools]
+        )
+        
+        # Build structured planning prompt
+        prompt = self._build_structured_planning_prompt(context)
+        
+        # Create a simple agent for structured output (no tools needed)
+        chat_model = ChatModel.from_name(self.llm_model)
+        memory = SlidingMemory(SlidingMemoryConfig(size=1))  # Minimal memory
+        simple_agent = ReActAgent(
+            llm=chat_model,
+            memory=memory,
+            tools=[]  # No tools for structured output
+        )
+        
+        # Execute planning with retries
+        max_retries = 3
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"[Planner] Structured planning attempt {attempt + 1}/{max_retries}")
+                
+                # Call agent with structured output prompt
+                timeout = 60.0
+                
+                response = await asyncio.wait_for(
+                    simple_agent.run(prompt),
+                    timeout=timeout
+                )
+                
+                # Extract text from BeeAI agent response using parser
+                response_text = self._parser.extract_simple_text(response)
+                logger.debug(f"[Planner] LLM response: {response_text[:500]}...")
+                
+                # Parse JSON response
+                plan_data = self._extract_json_from_response(response_text)
+                
+                # Strip credential fields from tool_args before validation
+                plan_data = self._strip_credentials_from_plan(plan_data)
+                
+                # Validate with Pydantic
+                plan_schema = ValidationPlanSchema(**plan_data)
+                
+                # Convert to ValidationPlan format
+                checks = [
+                    ValidationCheck(
+                        check_id=check.check_id,
+                        check_name=check.check_name,
+                        check_type=check.check_type.value,
+                        priority=check.priority,
+                        description=check.description,
+                        mcp_tool=check.mcp_tool,
+                        tool_args=check.tool_args,
+                        expected_result=check.expected_result,
+                        failure_impact=check.failure_impact
+                    )
+                    for check in plan_schema.checks
+                ]
+                
+                plan = ValidationPlan(
+                    strategy_name=f"{classification.category.value}_llm_structured",
+                    resource_category=classification.category,
+                    checks=checks,
+                    estimated_duration_seconds=len(checks) * 5,
+                    reasoning=plan_schema.reasoning,
+                    metrics=PlanningMetrics(
+                        planner_used="llm_structured",
+                        planning_time_ms=0,  # Will be set by caller
+                        llm_model=self.llm_model,
+                        num_checks=len(checks),
+                        num_priority_checks=len([c for c in checks if c.priority <= 2]),
+                        tool_names=[c.mcp_tool for c in checks]
+                    )
+                )
+                
+                logger.info(
+                    f"[Planner] Structured LLM generated {len(checks)} validation checks "
+                    f"(confidence: {plan_schema.confidence:.2f})"
+                )
+                
+                return plan
+                
+            except ValidationError as e:
+                last_error = e
+                logger.warning(
+                    f"[Planner] Pydantic validation failed (attempt {attempt + 1}): {e}"
+                )
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                    
+            except json.JSONDecodeError as e:
+                last_error = e
+                logger.warning(
+                    f"[Planner] JSON parsing failed (attempt {attempt + 1}): {e}"
+                )
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    
+            except Exception as e:
+                last_error = e
+                logger.error(
+                    f"[Planner] Structured planning failed (attempt {attempt + 1}): {e}",
+                    exc_info=True
+                )
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+        
+        # All retries failed
+        logger.error(f"[Planner] Structured LLM planning failed after {max_retries} attempts")
+        raise Exception(f"Structured LLM planning failed: {last_error}")
+    
+    def _build_structured_planning_prompt(self, context: PlanningContext) -> str:
+        """Build prompt for structured output planning.
+        
+        Args:
+            context: Planning context with resource info
+        
+        Returns:
+            Formatted prompt for structured output
+        """
+        # Get tool descriptions
+        tool_descriptions = []
+        for tool in self.mcp_tools:
+            tool_name = tool.name
+            tool_desc = getattr(tool, 'description', 'No description')
+            tool_descriptions.append(f"  - {tool_name}: {tool_desc}")
+        
+        tools_text = "\n".join(tool_descriptions[:20])  # Limit to first 20
+        
+        prompt = f"""You are a validation planning expert for infrastructure recovery validation.
+
+TASK: Create a comprehensive validation plan for a recovered {context.resource_type} resource.
+
+RESOURCE INFORMATION:
+- Host: {context.host}
+- Resource Type: {context.resource_type}
+- Category: {context.category}
+- Primary Application: {context.primary_application or "Unknown"}
+- Secondary Applications: {", ".join(context.secondary_applications) if context.secondary_applications else "None"}
+
+AVAILABLE MCP TOOLS:
+{tools_text}
+
+REQUIREMENTS:
+1. Create 3-8 validation checks appropriate for this resource type
+2. Prioritize checks: 1=critical (connectivity, availability), 2=high (integrity, config), 3-5=lower priority
+3. Use ONLY the MCP tool names listed above (exact names)
+4. NEVER include user, password, secret, token, key, or credential fields in tool_args
+5. Credentials are injected automatically by the system - do not add them
+6. Focus on post-recovery validation (verify the resource is healthy after recovery)
+
+VALIDATION PRIORITIES:
+- Priority 1 (Critical): Network connectivity, service availability, database ping
+- Priority 2 (High): Data integrity, configuration validation, resource usage
+- Priority 3 (Medium): Performance metrics, optional services
+- Priority 4-5 (Low): Detailed diagnostics, nice-to-have checks
+
+OUTPUT FORMAT:
+You MUST respond with valid JSON matching this exact schema:
+
+{{
+  "reasoning": "Explain your validation strategy in 2-3 sentences",
+  "checks": [
+    {{
+      "check_id": "net_001",
+      "check_name": "Network Connectivity",
+      "check_type": "network",
+      "priority": 1,
+      "description": "Verify network connectivity to the resource",
+      "mcp_tool": "tcp_portcheck",
+      "tool_args": {{"port": 22, "host": "192.168.1.100"}},
+      "expected_result": "Port 22 is accessible",
+      "failure_impact": "Cannot connect to resource"
+    }}
+  ],
+  "confidence": 0.9,
+  "strategy": "llm_structured"
+}}
+
+IMPORTANT:
+- Output ONLY valid JSON, no markdown, no explanations
+- Use exact MCP tool names from the list above
+- check_id format: <type>_<number> with 3 digits (e.g., "db_001", "net_001", "sys_002")
+- check_type must be one of: network, database, system, application, security, performance
+- Include at least one priority 1 check
+- NEVER add user, password, secret, token, key, or any credential fields to tool_args
+- tool_args should only contain non-sensitive parameters like host, port, database_name, etc.
+
+Generate the validation plan now:"""
+        
+        return prompt
+    
+    def _extract_json_from_response(self, response_text: str) -> dict:
+        """Extract JSON from LLM response.
+        
+        Handles cases where LLM wraps JSON in markdown code blocks or adds text.
+        
+        Args:
+            response_text: Raw LLM response
+        
+        Returns:
+            Parsed JSON dict
+        
+        Raises:
+            json.JSONDecodeError: If JSON cannot be extracted
+        """
+        # Try direct parsing first
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            pass
+        
+        # Try extracting from markdown code block
+        import re
+        
+        # Look for ```json ... ``` or ``` ... ```
+        json_pattern = r'```(?:json)?\s*(\{.*?\})\s*```'
+        match = re.search(json_pattern, response_text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+        
+        # Look for first { to last }
+        start = response_text.find('{')
+        end = response_text.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(response_text[start:end+1])
+            except json.JSONDecodeError:
+                pass
+        
+        # Failed to extract JSON
+        raise json.JSONDecodeError(
+            "Could not extract valid JSON from response",
+            response_text,
+            0
+        )
+    def _strip_credentials_from_plan(self, plan_data: dict) -> dict:
+        """Remove credential fields from tool_args in the plan.
+        
+        This is a safety measure to handle cases where the LLM includes
+        credential fields despite being instructed not to.
+        
+        Args:
+            plan_data: Raw plan data from LLM
+        
+        Returns:
+            Plan data with credentials stripped from all tool_args
+        """
+        forbidden_keys = {'user', 'password', 'secret', 'token', 'key', 'credential', 
+                         'username', 'passwd', 'api_key', 'apikey', 'auth'}
+        
+        if 'checks' in plan_data:
+            for check in plan_data['checks']:
+                if 'tool_args' in check and isinstance(check['tool_args'], dict):
+                    # Remove any forbidden keys
+                    keys_to_remove = [
+                        k for k in check['tool_args'].keys()
+                        if any(forbidden in k.lower() for forbidden in forbidden_keys)
+                    ]
+                    for key in keys_to_remove:
+                        logger.warning(f"[Planner] Stripping credential field '{key}' from tool_args")
+                        del check['tool_args'][key]
+        
+        return plan_data
+    
+    
         if not self.mcp_tools:
             return "No tools available"
         

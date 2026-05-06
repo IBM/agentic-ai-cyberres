@@ -51,7 +51,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # ── OpenTelemetry Instrumentation (via dedicated module) ──────────────────────
-from beeai_telemetry import (
+from agents.telemetry import (
     initialize_telemetry,
     flush_telemetry,
     shutdown_telemetry,
@@ -527,11 +527,11 @@ class InteractiveCLI:
                             "host_found": info['host'],
                             "has_email": bool(email_address)
                         })
-                        parse_span.set_output({
-                            "host": info['host'],
-                            "credential_id": info.get("credential_id"),
-                            "email": email_address,
-                        })
+                        parse_span.set_attribute("host", info['host'])
+                        if info.get("credential_id"):
+                            parse_span.set_attribute("credential_id", info.get("credential_id"))
+                        if email_address:
+                            parse_span.set_attribute("email", email_address)
 
                 print(f"\n  ✅ Understood:")
                 print(f"     Target : {info['host']}")
@@ -567,10 +567,8 @@ class InteractiveCLI:
                             "has_credentials": has_creds,
                             "credential_source": str(request.credential_source)
                         })
-                        cred_span.set_output({
-                            "host": resource.host,
-                            "has_credentials": has_creds,
-                        })
+                        cred_span.set_attribute("host", resource.host)
+                        cred_span.set_attribute("has_credentials", has_creds)
 
                 # Show workflow progress
                 progress = WorkflowProgressDisplay(resource.host)
@@ -629,31 +627,25 @@ class InteractiveCLI:
                                 "has_errors": phase in result.errors
                             })
                         
-                        # Set structured output for Phoenix UI
-                        workflow_span.set_output({
-                            "workflow_status": result.workflow_status,
-                            "validation_result": {
-                                "score": result.validation_result.score,
-                                "passed_checks": result.validation_result.passed_checks,
-                                "failed_checks": result.validation_result.failed_checks,
-                                "warning_checks": result.validation_result.warning_checks,
-                            },
-                            "elapsed_seconds": round(elapsed, 2),
-                            "phase_timings": {k: round(v, 2) for k, v in result.phase_timings.items()},
-                        })
+                        # Set structured attributes for Phoenix UI
+                        workflow_span.set_attribute("workflow_status", result.workflow_status)
+                        workflow_span.set_attribute("validation_score", result.validation_result.score)
+                        workflow_span.set_attribute("passed_checks", result.validation_result.passed_checks)
+                        workflow_span.set_attribute("failed_checks", result.validation_result.failed_checks)
+                        workflow_span.set_attribute("warning_checks", result.validation_result.warning_checks)
+                        workflow_span.set_attribute("elapsed_seconds", round(elapsed, 2))
                 
-                # Set final workflow output
+                # Set final workflow attributes
                 if workflow_root_span:
-                    workflow_root_span.set_output({
-                        "status": result.workflow_status,
-                        "score": result.validation_result.score,
-                        "total_checks": (
-                            result.validation_result.passed_checks +
-                            result.validation_result.failed_checks +
-                            result.validation_result.warning_checks
-                        ),
-                        "elapsed_seconds": round(elapsed, 2),
-                    })
+                    workflow_root_span.set_attribute("status", result.workflow_status)
+                    workflow_root_span.set_attribute("score", result.validation_result.score)
+                    total_checks = (
+                        result.validation_result.passed_checks +
+                        result.validation_result.failed_checks +
+                        result.validation_result.warning_checks
+                    )
+                    workflow_root_span.set_attribute("total_checks", total_checks)
+                    workflow_root_span.set_attribute("elapsed_seconds", round(elapsed, 2))
 
                 # Update progress display
                 for phase, timing in result.phase_timings.items():
@@ -679,7 +671,8 @@ class InteractiveCLI:
                     ) as email_span:
                         await self._send_email_report(result, request, email_address)
                         if email_span:
-                            email_span.set_output({"status": "sent", "recipient": email_address})
+                            email_span.set_attribute("status", "sent")
+                            email_span.set_attribute("recipient", email_address)
 
                 # Flush traces to Phoenix immediately after validation
                 if is_telemetry_enabled():
