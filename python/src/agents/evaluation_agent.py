@@ -242,25 +242,47 @@ Evaluation Process:
             # Use BeeAI agent for evaluation
             evaluation_agent = self._create_evaluation_agent()
             
-            result = await evaluation_agent.run(
-                prompt,
-                expected_output=OverallEvaluation
-            )
+            # Import response parser
+            from agents.output import AgentResponseParser
+            parser = AgentResponseParser()
             
-            if result.output_structured:
-                evaluation = result.output_structured
-                logger.info(
-                    f"Evaluation complete: {evaluation.overall_health} "
-                    f"({len(evaluation.critical_issues)} critical, "
-                    f"{len(evaluation.warnings)} warnings)"
-                )
-                return evaluation
+            result = await evaluation_agent.run(prompt)
+            
+            # Extract text from agent response
+            response_text = parser.extract_simple_text(result)
+            logger.debug(f"Evaluation response: {response_text[:500]}...")
+            
+            # Try to parse as JSON
+            import json
+            import re
+            
+            # Extract JSON from response (handle markdown code blocks)
+            json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+            if json_match:
+                json_text = json_match.group(1)
             else:
-                logger.warning("No structured output, using fallback evaluation")
-                return self._create_fallback_evaluation(validation_result)
+                # Look for first { to last }
+                start = response_text.find('{')
+                end = response_text.rfind('}')
+                if start != -1 and end != -1:
+                    json_text = response_text[start:end+1]
+                else:
+                    json_text = response_text
+            
+            # Parse and validate
+            eval_data = json.loads(json_text)
+            evaluation = OverallEvaluation(**eval_data)
+            
+            logger.info(
+                f"Evaluation complete: {evaluation.overall_health} "
+                f"({len(evaluation.critical_issues)} critical, "
+                f"{len(evaluation.warnings)} warnings)"
+            )
+            return evaluation
         
         except Exception as e:
             logger.warning(f"Failed to create AI evaluation: {e}, using fallback")
+            logger.debug(f"Evaluation error details", exc_info=True)
             return self._create_fallback_evaluation(validation_result)
     
     def _build_evaluation_prompt(
@@ -426,7 +448,37 @@ Evaluation Process:
             "",
             "**Important**: Show your reasoning process for each step. Explain WHY, not just WHAT.",
             "",
-            "Respond with a complete OverallEvaluation including all required fields."
+            "## OUTPUT FORMAT",
+            "",
+            "You MUST respond with ONLY valid JSON matching this exact schema:",
+            "",
+            "{",
+            '  "overall_health": "excellent|good|fair|poor|critical",',
+            '  "confidence": 0.9,',
+            '  "summary": "Executive summary of findings",',
+            '  "critical_issues": ["Issue 1", "Issue 2"],',
+            '  "warnings": ["Warning 1", "Warning 2"],',
+            '  "recommendations": ["Recommendation 1", "Recommendation 2"],',
+            '  "check_assessments": [',
+            "    {",
+            '      "check_id": "check_001",',
+            '      "severity": "critical|high|medium|low|info",',
+            '      "impact_analysis": "Detailed impact analysis",',
+            '      "root_cause": "Potential root cause",',
+            '      "remediation_steps": ["Step 1", "Step 2"]',
+            "    }",
+            "  ],",
+            '  "next_steps": ["Next step 1", "Next step 2"]',
+            "}",
+            "",
+            "CRITICAL INSTRUCTIONS:",
+            "1. Output ONLY valid JSON - no other text before or after",
+            "2. Do NOT wrap in markdown code blocks (no ```)",
+            "3. Do NOT add explanations or comments",
+            "4. Start with { and end with }",
+            "5. Include ALL required fields",
+            "",
+            "Generate the evaluation JSON now:"
         ])
         
         return "\n".join(prompt_parts)

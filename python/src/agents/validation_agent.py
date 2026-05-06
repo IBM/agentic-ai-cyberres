@@ -517,7 +517,7 @@ Remember: Follow the ReAct format strictly - each Thought must be followed by ei
             try:
                 logger.info(f"[Planner] Structured planning attempt {attempt + 1}/{max_retries}")
                 
-                # Call agent with structured output prompt
+                # Call agent with timeout
                 timeout = 60.0
                 
                 response = await asyncio.wait_for(
@@ -665,7 +665,7 @@ You MUST respond with valid JSON matching this exact schema:
       "priority": 1,
       "description": "Verify network connectivity to the resource",
       "mcp_tool": "tcp_portcheck",
-      "tool_args": {{"port": 22, "host": "192.168.1.100"}},
+      "tool_args": {{"host": "{context.host}", "ports": [22]}},
       "expected_result": "Port 22 is accessible",
       "failure_impact": "Cannot connect to resource"
     }}
@@ -674,16 +674,25 @@ You MUST respond with valid JSON matching this exact schema:
   "strategy": "llm_structured"
 }}
 
-IMPORTANT:
-- Output ONLY valid JSON, no markdown, no explanations
-- Use exact MCP tool names from the list above
-- check_id format: <type>_<number> with 3 digits (e.g., "db_001", "net_001", "sys_002")
-- check_type must be one of: network, database, system, application, security, performance
-- Include at least one priority 1 check
-- NEVER add user, password, secret, token, key, or any credential fields to tool_args
-- tool_args should only contain non-sensitive parameters like host, port, database_name, etc.
+IMPORTANT TOOL ARGUMENT FORMATS:
+- tcp_portcheck: {{"host": "IP", "ports": [22, 80]}} - ports must be a LIST
+- db_mongo_ssh_ping: {{"host": "IP"}} - no port needed
+- db_mongo_ssh_rs_status: {{"host": "IP"}} - no port needed
+- ssh_execute_command: {{"host": "IP", "command": "ls -la"}}
 
-Generate the validation plan now:"""
+CRITICAL INSTRUCTIONS:
+1. Your response MUST be ONLY valid JSON - no other text before or after
+2. Do NOT wrap the JSON in markdown code blocks (no ```)
+3. Do NOT add any explanations or comments
+4. Start your response with {{ and end with }}
+5. Use exact MCP tool names from the list above
+6. check_id format: <type>_<number> with 3 digits (e.g., "db_001", "net_001", "sys_002")
+7. check_type must be one of: network, database, system, application, security, performance
+8. Include at least one priority 1 check
+9. NEVER add user, password, secret, token, key, or any credential fields to tool_args
+10. tool_args should only contain non-sensitive parameters like host, port, database_name, etc.
+
+RESPOND WITH ONLY THE JSON OBJECT NOW:"""
         
         return prompt
     
