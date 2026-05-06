@@ -82,9 +82,22 @@ class ValidationCheckSchema(BaseModel):
     @validator('tool_args')
     def validate_no_credentials(cls, v):
         """Ensure no credentials are included in tool_args."""
-        forbidden_keys = {'password', 'secret', 'token', 'key', 'credential'}
+        # Forbidden keys - actual sensitive data
+        forbidden_keys = {'password', 'secret', 'token', 'key_path', 'ssh_key', 'private_key'}
+        # Allowed keys - non-sensitive references
+        allowed_keys = {'credential_id', 'host', 'port', 'ports', 'database', 'database_name',
+                       'collection', 'command', 'timeout', 'service_name'}
+        
         for key in v.keys():
-            if any(forbidden in key.lower() for forbidden in forbidden_keys):
+            key_lower = key.lower()
+            # Skip if it's an allowed key
+            if key_lower in allowed_keys or key in allowed_keys:
+                continue
+            # Check if it matches any forbidden pattern
+            if any(forbidden in key_lower for forbidden in forbidden_keys):
+                raise ValueError(f"Credentials not allowed in tool_args: {key}")
+            # Also check for standalone credential field names
+            if key_lower in {'user', 'username', 'ssh_user', 'db_user', 'mongo_user', 'passwd'}:
                 raise ValueError(f"Credentials not allowed in tool_args: {key}")
         return v
 

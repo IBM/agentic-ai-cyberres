@@ -385,6 +385,63 @@ def create_app() -> FastMCP:
     def acceptance_db_mongo() -> str:
         with open(os.path.join(resource_dir, "db-mongo.json"), "r", encoding="utf-8") as f:
             return f.read()
+    # ── Tool Metadata Resources (for LLM-driven tool selection) ──────────────────
+    
+    @app.resource(
+        "resource://tool-metadata/complete",
+        title="Complete Tool Metadata",
+        description="Complete tool metadata for LLM-driven tool selection including categories, priorities, compatibility matrix, and dependencies.",
+        mime_type="application/json",
+    )
+    def tool_metadata_complete() -> str:
+        """Return complete tool metadata for LLM consumption."""
+        from .tool_metadata import get_complete_metadata
+        return json.dumps(get_complete_metadata(), indent=2)
+    
+    @app.resource(
+        "resource://tool-metadata/compatibility",
+        title="Tool Compatibility Matrix",
+        description="Resource-tool compatibility matrix showing which tools work with which resource types.",
+        mime_type="application/json",
+    )
+    def tool_metadata_compatibility() -> str:
+        """Return resource-tool compatibility matrix."""
+        from .tool_metadata import RESOURCE_TOOL_COMPATIBILITY
+        return json.dumps(RESOURCE_TOOL_COMPATIBILITY, indent=2)
+    
+    @app.resource(
+        "resource://tool-metadata/categories",
+        title="Tool Categories",
+        description="Tool categories grouping tools by functionality (network, system, mongodb, oracle, etc.).",
+        mime_type="application/json",
+    )
+    def tool_metadata_categories() -> str:
+        """Return tool categories."""
+        from .tool_metadata import TOOL_CATEGORIES
+        return json.dumps(TOOL_CATEGORIES, indent=2)
+    
+    @app.resource(
+        "resource://tool-metadata/priorities",
+        title="Tool Priorities",
+        description="Tool priority levels (critical, high, medium, low) indicating importance of each tool.",
+        mime_type="application/json",
+    )
+    def tool_metadata_priorities() -> str:
+        """Return tool priorities."""
+        from .tool_metadata import TOOL_PRIORITIES
+        return json.dumps(TOOL_PRIORITIES, indent=2)
+    
+    @app.resource(
+        "resource://tool-metadata/validation-layers",
+        title="Tool Validation Layers",
+        description="Validation layers (network, system, application, data) showing execution order.",
+        mime_type="application/json",
+    )
+    def tool_metadata_validation_layers() -> str:
+        """Return validation layers."""
+        from .tool_metadata import TOOL_VALIDATION_LAYERS
+        return json.dumps(TOOL_VALIDATION_LAYERS, indent=2)
+
 
     # ── Native MCP prompts (orchestration templates) ──────────────────────────────
     prompt_dir = os.path.join(os.path.dirname(__file__), "prompts")

@@ -554,6 +554,82 @@ Remember: Follow the ReAct format strictly - each Thought must be followed by ei
                     for check in plan_schema.checks
                 ]
                 
+                # ENFORCE MINIMUM TOOL COUNT - LLM often ignores instructions
+                # For unknown/unclassified resources, default to generic VM validation
+                is_unknown = (
+                    classification.category.value.lower() == "unknown" or
+                    not classification.primary_application or
+                    (hasattr(classification, 'confidence') and classification.confidence < 0.1)
+                )
+                
+                min_tools = 4 if is_unknown else (5 if "database" in classification.category.value.lower() else 4)
+                
+                if len(checks) < min_tools:
+                    logger.warning(
+                        f"[Planner] LLM generated only {len(checks)} checks, "
+                        f"but minimum is {min_tools}. Adding recommended tools..."
+                    )
+                    
+                    # Determine what tools are missing based on resource type
+                    existing_tools = {c.mcp_tool for c in checks}
+                    
+                    # Handle ApplicationDetection object or string
+                    if classification.primary_application and not is_unknown:
+                        if hasattr(classification.primary_application, 'name'):
+                            resource_key = classification.primary_application.name.lower()
+                        else:
+                            resource_key = str(classification.primary_application).lower()
+                    else:
+                        resource_key = ""
+                    
+                    # Define recommended tools by resource type
+                    if is_unknown or not resource_key:
+                        # Unknown/unclassified resources: use generic VM tools
+                        logger.info("[Planner] Resource is unknown/unclassified, using generic VM tools")
+                        recommended = [
+                            ("vm_linux_fs_usage", "Filesystem Usage", "system", 2, "Check disk space usage"),
+                            ("vm_linux_services", "Service Status", "system", 2, "Verify required services are running"),
+                            ("discover_os_only", "OS Discovery", "system", 3, "Discover operating system details")
+                        ]
+                    elif "mongo" in resource_key:
+                        recommended = [
+                            ("vm_linux_fs_usage", "Filesystem Usage", "system", 2, "Check disk space usage"),
+                            ("vm_linux_services", "Service Status", "system", 2, "Verify required services are running"),
+                            ("db_mongo_rs_status", "Replica Set Status", "database", 2, "Check MongoDB replica set health"),
+                            ("validate_collection", "Data Integrity", "database", 3, "Validate collection integrity")
+                        ]
+                    elif "oracle" in resource_key:
+                        recommended = [
+                            ("vm_linux_fs_usage", "Filesystem Usage", "system", 2, "Check disk space usage"),
+                            ("vm_linux_services", "Service Status", "system", 2, "Verify required services are running"),
+                            ("db_oracle_tablespaces", "Tablespace Health", "database", 2, "Check Oracle tablespace usage"),
+                            ("db_oracle_data_validation", "Data Integrity", "database", 3, "Validate data integrity")
+                        ]
+                    else:
+                        recommended = [
+                            ("vm_linux_fs_usage", "Filesystem Usage", "system", 2, "Check disk space usage"),
+                            ("vm_linux_services", "Service Status", "system", 2, "Verify required services are running"),
+                            ("discover_os_only", "OS Discovery", "system", 3, "Discover operating system details")
+                        ]
+                    
+                    # Add missing recommended tools
+                    for tool_name, check_name, check_type, priority, description in recommended:
+                        if tool_name not in existing_tools and len(checks) < min_tools + 3:
+                            new_check = ValidationCheck(
+                                check_id=f"{check_type[:3]}_{len(checks)+1:03d}",
+                                check_name=check_name,
+                                check_type=check_type,
+                                priority=priority,
+                                description=description,
+                                mcp_tool=tool_name,
+                                tool_args={"host": resource.host, "credential_id": "credential_id"},
+                                expected_result=f"{check_name} completed successfully",
+                                failure_impact=f"Cannot verify {check_name.lower()}"
+                            )
+                            checks.append(new_check)
+                            existing_tools.add(tool_name)
+                            logger.info(f"[Planner] Added recommended tool: {tool_name}")
+                
                 plan = ValidationPlan(
                     strategy_name=f"{classification.category.value}_llm_structured",
                     resource_category=classification.category,
@@ -624,9 +700,86 @@ Remember: Follow the ReAct format strictly - each Thought must be followed by ei
         
         tools_text = "\n".join(tool_descriptions[:20])  # Limit to first 20
         
+        # Determine resource-specific tool guidance
+        # Handle ApplicationDetection object or string
+        if context.primary_application:
+            if hasattr(context.primary_application, 'name'):
+                resource_key = context.primary_application.name.lower()
+            else:
+                resource_key = str(context.primary_application).lower()
+        else:
+            resource_key = context.category.lower()
+        
+        # Tool compatibility guidance based on resource type
+        tool_guidance = ""
+        if "mongodb" in resource_key or "mongo" in resource_key:
+            tool_guidance = """
+RESOURCE-SPECIFIC TOOL REQUIREMENTS FOR MONGODB:
+✅ REQUIRED TOOLS (must include):
+  - tcp_portcheck (network connectivity)
+  - db_mongo_connect (MongoDB connectivity)
+
+✅ RECOMMENDED TOOLS (should include 4-6 of these):
+  - vm_linux_uptime_load_mem (system health)
+  - vm_linux_fs_usage (disk space)
+  - vm_linux_services (service status)
+  - db_mongo_rs_status (replica set health)
+  - validate_collection (data integrity)
+
+⚠️  TOOL SELECTION RULES:
+  - Focus on MongoDB-specific validation (db_mongo_* tools)
+  - Include VM infrastructure checks (vm_linux_* tools)
+  - Only use tools relevant to MongoDB validation
+  - Do NOT use Oracle/PostgreSQL tools unless the resource also runs those applications
+
+MINIMUM TOOL COUNT: 5-7 tools for comprehensive MongoDB validation
+"""
+        elif "oracle" in resource_key:
+            tool_guidance = """
+RESOURCE-SPECIFIC TOOL REQUIREMENTS FOR ORACLE:
+✅ REQUIRED TOOLS (must include):
+  - tcp_portcheck (network connectivity)
+  - db_oracle_connect (Oracle connectivity)
+
+✅ RECOMMENDED TOOLS (should include 4-6 of these):
+  - vm_linux_uptime_load_mem (system health)
+  - vm_linux_fs_usage (disk space)
+  - vm_linux_services (service status)
+  - db_oracle_tablespaces (tablespace health)
+  - db_oracle_data_validation (data integrity)
+
+⚠️  TOOL SELECTION RULES:
+  - Focus on Oracle-specific validation (db_oracle_* tools)
+  - Include VM infrastructure checks (vm_linux_* tools)
+  - Only use tools relevant to Oracle validation
+  - Do NOT use MongoDB/PostgreSQL tools unless the resource also runs those applications
+
+MINIMUM TOOL COUNT: 5-7 tools for comprehensive Oracle validation
+"""
+        else:
+            tool_guidance = """
+RESOURCE-SPECIFIC TOOL REQUIREMENTS FOR VM:
+✅ REQUIRED TOOLS (must include):
+  - tcp_portcheck (network connectivity)
+  - vm_linux_uptime_load_mem (system health)
+
+✅ RECOMMENDED TOOLS (should include 2-4 of these):
+  - vm_linux_fs_usage (disk space)
+  - vm_linux_services (service status)
+  - discover_os_only (OS discovery)
+
+⚠️  TOOL SELECTION RULES:
+  - Focus on VM infrastructure validation (vm_linux_* tools)
+  - Use generic validation tools (tcp_portcheck, discover_os_only)
+  - Only use application-specific tools if you have evidence of those applications running
+  - If no specific application is identified, use only VM-level tools
+
+MINIMUM TOOL COUNT: 4-6 tools for comprehensive VM validation
+"""
+        
         prompt = f"""You are a validation planning expert for infrastructure recovery validation.
 
-TASK: Create a comprehensive validation plan for a recovered {context.resource_type} resource.
+TASK: Create a COMPREHENSIVE validation plan for a recovered {context.resource_type} resource that ensures production readiness.
 
 RESOURCE INFORMATION:
 - Host: {context.host}
@@ -638,18 +791,38 @@ RESOURCE INFORMATION:
 AVAILABLE MCP TOOLS:
 {tools_text}
 
+{tool_guidance}
+
+VALIDATION PHILOSOPHY:
+Your goal is to create a THOROUGH validation plan that validates the resource across MULTIPLE LAYERS:
+1. Network Layer: Verify connectivity to all required ports
+2. System Layer: Verify underlying VM/system health (for VM-based resources)
+3. Application Layer: Validate application-specific functionality and health
+4. Data Layer: Validate data integrity where applicable
+
+CRITICAL TOOL SELECTION RULES:
+1. ✅ ALWAYS include ALL required tools for the PRIMARY resource type being validated
+2. ✅ ALWAYS include 4-6 recommended tools (aim for 5-10 total tools)
+3. ✅ Focus on tools relevant to the PRIMARY application (e.g., db_mongo_* for MongoDB validation)
+4. ✅ Include VM infrastructure tools (vm_linux_*) for database resources on VMs
+5. ⚠️  Only use application-specific tools that match the resource being validated
+6. ✅ Follow validation layer order: network → system → application → data
+7. ✅ Use ONLY the exact MCP tool names listed in "AVAILABLE MCP TOOLS"
+
 REQUIREMENTS:
-1. Create 3-8 validation checks appropriate for this resource type
-2. Prioritize checks: 1=critical (connectivity, availability), 2=high (integrity, config), 3-5=lower priority
-3. Use ONLY the MCP tool names listed above (exact names)
-4. NEVER include user, password, secret, token, key, or credential fields in tool_args
-5. Credentials are injected automatically by the system - do not add them
-6. Focus on post-recovery validation (verify the resource is healthy after recovery)
+1. Include 5-10 validation checks for comprehensive production validation
+2. For database resources on VMs: Include BOTH database-specific AND VM infrastructure checks
+3. For MongoDB: Include db_mongo_* tools (NOT db_oracle_* tools)
+4. For Oracle: Include db_oracle_* tools (NOT db_mongo_* tools)
+5. Prioritize checks: 1=critical (connectivity, availability), 2=high (integrity, config), 3-5=lower priority
+6. NEVER include user, password, secret, token, key, or credential fields in tool_args
+7. Credentials are injected automatically by the system - do not add them
+8. Focus on post-recovery validation (verify the resource is healthy after recovery)
 
 VALIDATION PRIORITIES:
-- Priority 1 (Critical): Network connectivity, service availability, database ping
-- Priority 2 (High): Data integrity, configuration validation, resource usage
-- Priority 3 (Medium): Performance metrics, optional services
+- Priority 1 (Critical): Network connectivity, service availability, database connection
+- Priority 2 (High): Data integrity, configuration validation, resource usage, replica set status
+- Priority 3 (Medium): Performance metrics, optional services, system health
 - Priority 4-5 (Low): Detailed diagnostics, nice-to-have checks
 
 OUTPUT FORMAT:
@@ -668,6 +841,17 @@ You MUST respond with valid JSON matching this exact schema:
       "tool_args": {{"host": "{context.host}", "ports": [22]}},
       "expected_result": "Port 22 is accessible",
       "failure_impact": "Cannot connect to resource"
+    }},
+    {{
+      "check_id": "sys_001",
+      "check_name": "System Health Check",
+      "check_type": "system",
+      "priority": 1,
+      "description": "Check system uptime, load, and memory",
+      "mcp_tool": "vm_linux_uptime_load_mem",
+      "tool_args": {{"host": "{context.host}", "credential_id": "credential_id"}},
+      "expected_result": "System is healthy with acceptable load",
+      "failure_impact": "Cannot verify system health"
     }}
   ],
   "confidence": 0.9,
@@ -676,9 +860,13 @@ You MUST respond with valid JSON matching this exact schema:
 
 IMPORTANT TOOL ARGUMENT FORMATS:
 - tcp_portcheck: {{"host": "IP", "ports": [22, 80]}} - ports must be a LIST
-- db_mongo_ssh_ping: {{"host": "IP"}} - no port needed
-- db_mongo_ssh_rs_status: {{"host": "IP"}} - no port needed
-- ssh_execute_command: {{"host": "IP", "command": "ls -la"}}
+- db_mongo_connect: {{"host": "IP", "credential_id": "credential_id"}} - ALWAYS include credential_id
+- db_mongo_ssh_ping: {{"host": "IP", "credential_id": "credential_id"}} - ALWAYS include credential_id
+- db_mongo_ssh_rs_status: {{"host": "IP", "credential_id": "credential_id"}} - ALWAYS include credential_id
+- vm_linux_uptime_load_mem: {{"host": "IP", "credential_id": "credential_id"}} - ALWAYS include credential_id
+- vm_linux_fs_usage: {{"host": "IP", "credential_id": "credential_id"}} - ALWAYS include credential_id
+- vm_linux_services: {{"host": "IP", "credential_id": "credential_id"}} - ALWAYS include credential_id
+- ssh_execute_command: {{"host": "IP", "command": "ls -la", "credential_id": "credential_id"}} - ALWAYS include credential_id
 
 CRITICAL INSTRUCTIONS:
 1. Your response MUST be ONLY valid JSON - no other text before or after
@@ -690,7 +878,8 @@ CRITICAL INSTRUCTIONS:
 7. check_type must be one of: network, database, system, application, security, performance
 8. Include at least one priority 1 check
 9. NEVER add user, password, secret, token, key, or any credential fields to tool_args
-10. tool_args should only contain non-sensitive parameters like host, port, database_name, etc.
+10. ALWAYS include "credential_id": "credential_id" in tool_args for ALL tools that need authentication (all tools except tcp_portcheck)
+11. tool_args should only contain non-sensitive parameters like host, port, database_name, and credential_id
 
 RESPOND WITH ONLY THE JSON OBJECT NOW:"""
         
@@ -755,17 +944,31 @@ RESPOND WITH ONLY THE JSON OBJECT NOW:"""
         Returns:
             Plan data with credentials stripped from all tool_args
         """
-        forbidden_keys = {'user', 'password', 'secret', 'token', 'key', 'credential', 
-                         'username', 'passwd', 'api_key', 'apikey', 'auth'}
+        # Keys that should be stripped (actual sensitive data)
+        forbidden_keys = {'password', 'secret', 'token', 'key_path', 'ssh_key',
+                         'passwd', 'api_key', 'apikey', 'auth_token', 'private_key'}
+        
+        # Keys that are allowed (non-sensitive references)
+        allowed_keys = {'credential_id', 'host', 'port', 'database', 'database_name',
+                       'collection', 'command', 'ports', 'timeout', 'service_name'}
         
         if 'checks' in plan_data:
             for check in plan_data['checks']:
                 if 'tool_args' in check and isinstance(check['tool_args'], dict):
-                    # Remove any forbidden keys
-                    keys_to_remove = [
-                        k for k in check['tool_args'].keys()
-                        if any(forbidden in k.lower() for forbidden in forbidden_keys)
-                    ]
+                    # Remove forbidden keys, but keep allowed ones
+                    keys_to_remove = []
+                    for k in check['tool_args'].keys():
+                        k_lower = k.lower()
+                        # Skip if it's an allowed key
+                        if k_lower in allowed_keys or k in allowed_keys:
+                            continue
+                        # Check if it matches any forbidden pattern
+                        if any(forbidden in k_lower for forbidden in forbidden_keys):
+                            keys_to_remove.append(k)
+                        # Also check for standalone 'user' or 'username' (but not in credential_id)
+                        elif k_lower in {'user', 'username', 'ssh_user', 'db_user', 'mongo_user'}:
+                            keys_to_remove.append(k)
+                    
                     for key in keys_to_remove:
                         logger.warning(f"[Planner] Stripping credential field '{key}' from tool_args")
                         del check['tool_args'][key]
@@ -964,7 +1167,7 @@ RESPOND WITH ONLY THE JSON OBJECT NOW:"""
         """
         logger.info("[Planner] Injecting credentials using tool schemas")
         
-        # Get credentials from resource
+        # Get credentials from resource (CLI already loaded them)
         credentials = self._extract_credentials(resource)
         
         if not credentials:
@@ -974,14 +1177,25 @@ RESPOND WITH ONLY THE JSON OBJECT NOW:"""
         # Inject credentials into checks using tool schemas
         updated_checks = []
         for check in plan.checks:
-            # Find the tool to get its schema
+            # Start with a copy of tool_args
+            updated_args = check.tool_args.copy()
+            
+            # ALWAYS inject credential_id if available and not already present
+            # This is critical for tools that need authentication
+            if 'credential_id' in credentials and 'credential_id' not in updated_args:
+                # Skip tcp_portcheck as it doesn't need credentials
+                if check.mcp_tool != 'tcp_portcheck':
+                    updated_args['credential_id'] = credentials['credential_id']
+                    logger.info(f"[Planner] Auto-injected credential_id for tool '{check.mcp_tool}'")
+            
+            # Find the tool to get its schema for additional credential injection
             tool = self._find_tool_by_name(check.mcp_tool)
             
             if tool:
-                # Inject credentials based on tool's input schema
+                # Inject additional credentials based on tool's input schema
                 updated_args = self._inject_credentials_for_tool(
                     tool,
-                    check.tool_args.copy(),
+                    updated_args,
                     credentials,
                     resource.host
                 )
@@ -1004,16 +1218,21 @@ RESPOND WITH ONLY THE JSON OBJECT NOW:"""
         return updated_plan
     
     def _extract_credentials(self, resource: ResourceInfo) -> Dict[str, Any]:
-        """Extract all available credentials from resource.
+        """Extract all available credentials from resource object.
+        
+        The CLI already loads credentials from secrets.json and passes them
+        to the resource object. This method simply extracts them from the
+        resource attributes.
         
         Args:
-            resource: Resource information
+            resource: Resource information (already contains credentials)
         
         Returns:
             Dictionary of available credentials
         """
         credentials = {}
         
+        # Extract credentials from resource object (CLI already loaded them)
         if isinstance(resource, VMResourceInfo):
             if resource.ssh_user:
                 credentials['ssh_user'] = resource.ssh_user
@@ -1046,6 +1265,7 @@ RESPOND WITH ONLY THE JSON OBJECT NOW:"""
             if resource.mongo_password:
                 credentials['mongo_password'] = resource.mongo_password
         
+        logger.info(f"[Planner] Extracted credentials from resource: {list(credentials.keys())}")
         return credentials
     
     def _find_tool_by_name(self, tool_name: str) -> Optional[MCPTool]:
@@ -1073,14 +1293,16 @@ RESPOND WITH ONLY THE JSON OBJECT NOW:"""
         credentials: Dict[str, Any],
         host: str
     ) -> Dict[str, Any]:
-        """Inject credentials for a specific tool using its input schema.
+        """Inject credentials for a specific tool using its Pydantic input schema.
         
-        This method inspects the tool's input schema to determine which
-        parameters it expects, then maps available credentials to those
-        parameters. This eliminates hardcoding and maintains loose coupling.
+        This method inspects the tool's Pydantic input schema to determine which
+        parameters it expects, then maps available credentials to those parameters.
+        
+        BeeAI's MCPTool.input_schema is a Pydantic BaseModel class, not a dictionary.
+        We access fields via model_fields, not properties.
         
         Args:
-            tool: MCP tool object with input schema
+            tool: MCP tool object with Pydantic input schema
             tool_args: Current tool arguments
             credentials: Available credentials
             host: Resource host
@@ -1089,58 +1311,80 @@ RESPOND WITH ONLY THE JSON OBJECT NOW:"""
             Updated tool arguments with credentials
         """
         try:
-            # Get tool's input schema - handle different schema formats
+            # Get tool's input schema - this is a Pydantic BaseModel class
             input_schema = getattr(tool, 'input_schema', None)
             
-            # Handle case where input_schema might be a dict or an object
             if input_schema is None:
                 logger.warning(f"[Planner] Tool '{tool.name}' has no input_schema, skipping credential injection")
                 return tool_args
             
-            # If input_schema is a dict, get properties directly
-            if isinstance(input_schema, dict):
-                properties = input_schema.get('properties', {})
-            else:
-                # If it's an object, try to access properties attribute
-                properties = getattr(input_schema, 'properties', {})
-                if not isinstance(properties, dict):
-                    properties = {}
+            # Check if it's a Pydantic model by looking for model_fields
+            model_fields = getattr(input_schema, 'model_fields', None)
             
-            if not properties:
-                logger.debug(f"[Planner] Tool '{tool.name}' has no properties in schema")
+            if model_fields is None:
+                logger.debug(f"[Planner] Tool '{tool.name}' input_schema is not a Pydantic model, skipping credential injection")
                 return tool_args
             
+            # Get field names from Pydantic model
+            field_names = list(model_fields.keys())
+            
+            if not field_names:
+                logger.debug(f"[Planner] Tool '{tool.name}' has no fields in Pydantic schema")
+                return tool_args
+            
+            logger.debug(f"[Planner] Tool '{tool.name}' has fields: {field_names}")
+            
             # Ensure host is set if tool expects it
-            if 'host' in properties and 'host' not in tool_args:
+            if 'host' in field_names and 'host' not in tool_args:
                 tool_args['host'] = host
+                logger.debug(f"[Planner] Injected host='{host}' for tool '{tool.name}'")
             
             # Map credentials to schema parameters
             # This mapping is generic and works for any tool schema
             credential_mappings = {
-                # SSH credentials
+                # SSH credentials - multiple parameter name variations
                 'username': credentials.get('ssh_user'),
                 'password': credentials.get('ssh_password'),
                 'key_path': credentials.get('ssh_key_path'),
                 'ssh_user': credentials.get('ssh_user'),
                 'ssh_password': credentials.get('ssh_password'),
                 'ssh_key_path': credentials.get('ssh_key_path'),
+                'ssh_host': host,  # ssh_host should be the resource host
                 # Database credentials
                 'db_user': credentials.get('db_user'),
                 'db_password': credentials.get('db_password'),
                 'mongo_user': credentials.get('mongo_user'),
                 'mongo_password': credentials.get('mongo_password'),
+                'credential_id': credentials.get('credential_id'),
             }
             
-            # Inject credentials only for parameters that exist in the schema
-            for param_name in properties:
+            # Log the credentials being mapped (without sensitive data)
+            logger.info(
+                f"[Planner] Credential mapping for tool '{tool.name}': "
+                f"available={list(credentials.keys())}, "
+                f"schema_fields={field_names}"
+            )
+            
+            # Inject credentials only for parameters that exist in the Pydantic schema
+            injected_count = 0
+            for field_name in field_names:
                 # Skip if already provided in tool_args
-                if param_name in tool_args:
+                if field_name in tool_args:
                     continue
                 
                 # Check if we have a credential for this parameter
-                if param_name in credential_mappings and credential_mappings[param_name]:
-                    tool_args[param_name] = credential_mappings[param_name]
-                    logger.debug(f"[Planner] Injected credential for parameter '{param_name}' in tool '{tool.name}'")
+                # Only inject if the value is not None
+                if field_name in credential_mappings:
+                    cred_value = credential_mappings[field_name]
+                    if cred_value is not None:
+                        tool_args[field_name] = cred_value
+                        injected_count += 1
+                        logger.debug(f"[Planner] Injected '{field_name}' for tool '{tool.name}'")
+            
+            if injected_count > 0:
+                logger.info(f"[Planner] Injected {injected_count} credentials for tool '{tool.name}'")
+            else:
+                logger.debug(f"[Planner] No credentials injected for tool '{tool.name}' (all fields already set or no matching credentials)")
             
             return tool_args
             

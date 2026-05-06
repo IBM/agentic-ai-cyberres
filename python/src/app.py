@@ -13,7 +13,7 @@ Features:
 
 import chainlit as cl
 from production.session_manager import get_session_manager, initialize_session_manager
-from agents.mcp_dynamic import DynamicMCPClient
+from production.validation_repository_mongodb import ValidationHistoryRepositoryMongoDB
 from cli import InteractiveCLI
 import logging
 import os
@@ -32,11 +32,47 @@ MAX_MESSAGE_LENGTH = 1000
 RATE_LIMIT_REQUESTS = 10
 RATE_LIMIT_WINDOW = 60  # seconds
 
+# MongoDB Repository (initialized on startup)
+_validation_repo: Optional[ValidationHistoryRepositoryMongoDB] = None
+
+
+def get_validation_repo() -> Optional[ValidationHistoryRepositoryMongoDB]:
+    """Get the global validation repository instance."""
+    return _validation_repo
+
+
+async def _ensure_mongodb_initialized():
+    """Ensure MongoDB repository is initialized (called once on first session)."""
+    global _validation_repo
+    
+    if _validation_repo is not None:
+        return  # Already initialized
+    
+    mongodb_url = os.getenv("MONGODB_URL")
+    mongodb_database = os.getenv("MONGODB_DATABASE", "beeai")
+    
+    if mongodb_url:
+        try:
+            _validation_repo = ValidationHistoryRepositoryMongoDB(
+                connection_string=mongodb_url,
+                database_name=mongodb_database
+            )
+            await _validation_repo.initialize()
+            logger.info("✓ MongoDB validation repository initialized")
+        except Exception as e:
+            logger.warning(f"MongoDB initialization failed: {e}. History features will be unavailable.")
+            _validation_repo = None
+    else:
+        logger.warning("MONGODB_URL not configured. History features will be unavailable.")
+
 
 @cl.on_chat_start
 async def start():
     """Initialize user session with proper isolation."""
     try:
+        # Ensure MongoDB is initialized (first session only)
+        await _ensure_mongodb_initialized()
+        
         # Get or create session ID
         session_id = cl.user_session.get("id")
         if not session_id:
@@ -104,37 +140,11 @@ I can help you validate infrastructure resources with enterprise-grade reliabili
             await init_msg.update()
             logger.error(f"CLI wrapper initialization failed for session {session_id}: {e}")
         
-        # Initialize dynamic MCP client
-        mcp_msg = cl.Message(content="🚀 Initializing dynamic MCP client...")
+        # Note: MCP client is managed internally by ValidationOrchestrator
+        # No need to initialize separate DynamicMCPClient here
+        mcp_msg = cl.Message(content="✅ MCP tools ready (managed by orchestrator)")
         await mcp_msg.send()
-        
-        try:
-            mcp_client = DynamicMCPClient(
-                server_path="../cyberres-mcp",
-                auto_discover=True
-            )
-            
-            connected = await mcp_client.connect()
-            
-            if connected:
-                tools = mcp_client.list_tool_names()
-                
-                # Store in session
-                await session_manager.update_session(session_id, {
-                    "mcp_client": mcp_client
-                })
-                
-                mcp_msg.content = f"✅ Dynamic MCP client ready! Discovered {len(tools)} tools."
-                await mcp_msg.update()
-                logger.info(f"MCP client initialized for session {session_id} with {len(tools)} tools")
-            else:
-                mcp_msg.content = "⚠️ MCP client connection failed. Some features unavailable."
-                await mcp_msg.update()
-                
-        except Exception as e:
-            mcp_msg.content = f"⚠️ MCP client initialization failed: {str(e)}"
-            await mcp_msg.update()
-            logger.error(f"MCP client initialization failed for session {session_id}: {e}")
+        logger.info(f"MCP tools available via orchestrator for session {session_id}")
         
     except Exception as e:
         logger.error(f"Session initialization failed: {e}")
@@ -177,30 +187,30 @@ async def main(message: cl.Message):
         await show_help()
         return
     
-    if content_lower == "list credentials":
+    if content_lower == "list credentials" or "list credential" in content_lower:
         await list_credentials(session)
         return
     
-    if content_lower in ["history", "show history"]:
-        await show_history(session)
+    # More flexible history matching
+    if (content_lower in ["history", "show history", "history all", "show all history"] or
+        "validation history" in content_lower or
+        "my history" in content_lower or
+        content_lower.startswith("show my")):
+        # Check if user wants all history
+        show_all = "all" in content_lower
+        await show_history(session, show_all=show_all)
         return
     
-    if content_lower in ["stats", "statistics"]:
-        await show_statistics(session)
+    if content_lower in ["stats", "statistics", "stats all", "statistics all"] or "statistic" in content_lower:
+        show_all = "all" in content_lower
+        await show_statistics(session, show_all=show_all)
         return
     
     if content_lower.startswith("compare"):
         await handle_comparison(session, clean_content)
         return
     
-    if content_lower in ["show tools", "list tools"]:
-        await show_tools(session)
-        return
-    
-    if content_lower.startswith("tool info "):
-        tool_name = clean_content[10:]
-        await show_tool_info(session, tool_name)
-        return
+    # Note: Tool listing removed - tools are managed internally by orchestrator
     
     # Handle validation request
     await handle_validation(session, clean_content)
@@ -238,16 +248,19 @@ async def handle_validation(session: dict, prompt: str):
         # Execute validation workflow
         result = await cli_wrapper.orchestrator.execute_workflow(request)
         
-        # Save to history (if database configured)
-        session_manager = get_session_manager()
-        await session_manager.add_validation_to_history(
-            session["id"],
-            {
-                "target": info['host'],
-                "score": result.validation_result.score,
-                "status": result.workflow_status
-            }
-        )
+        # Save to MongoDB (if configured)
+        repo = get_validation_repo()
+        if repo:
+            try:
+                user_id = session.get("user_id", "anonymous")
+                run_id = await repo.save_validation_run(
+                    user_id=user_id,
+                    session_id=session["id"],
+                    result=result
+                )
+                logger.info(f"Validation saved to MongoDB: {run_id}")
+            except Exception as e:
+                logger.error(f"Failed to save validation to MongoDB: {e}")
         
         # Display results
         await display_results(result, email_address)
@@ -265,6 +278,9 @@ async def handle_validation(session: dict, prompt: str):
                 await cl.Message(content=f"📧 Email report sent to {email_address}").send()
             except Exception as e:
                 await cl.Message(content=f"⚠️ Email sending failed: {str(e)}").send()
+        
+        # Show next steps
+        await show_next_steps()
         
     except Exception as e:
         processing_msg.content = f"❌ Validation failed: {str(e)}"
@@ -336,6 +352,28 @@ async def display_results(result, email_address=None):
         await cl.Message(content=eval_text).send()
 
 
+async def show_next_steps():
+    """Show what users can do next after validation."""
+    next_steps = """---
+
+## 🎯 What's Next?
+
+**Run another validation:**
+```
+Validate VM at <IP_ADDRESS> using credential <CREDENTIAL_ID>
+```
+
+**View your history:**
+- Type `history` to see past validations
+- Type `stats` to see statistics
+
+**Need help?**
+- Type `help` for full command list
+- Type `list credentials` to see available credentials
+"""
+    await cl.Message(content=next_steps).send()
+
+
 async def show_help():
     """Display help message."""
     help_text = """# BeeAI Production - Help
@@ -362,8 +400,6 @@ Validate VM at <IP_ADDRESS> using credential <CREDENTIAL_ID>, email <EMAIL>
 
 - `help` - Show this message
 - `list credentials` - Show available credentials
-- `show tools` - List MCP tools
-- `tool info <name>` - Get tool details
 
 ## Examples
 
@@ -381,97 +417,198 @@ Validate VM at <IP_ADDRESS> using credential <CREDENTIAL_ID>, email <EMAIL>
    ```
    stats
    ```
+
+**Note:** MCP tools are managed automatically by the orchestrator.
 """
     
     await cl.Message(content=help_text).send()
 
 
-async def show_history(session: dict):
-    """Show validation history for user."""
-    history = session.get("validation_history", [])
+async def show_history(session: dict, show_all: bool = False):
+    """Show validation history for user from MongoDB.
     
-    if not history:
-        await cl.Message(content="No validation history yet.").send()
+    Args:
+        session: User session dictionary
+        show_all: If True, show all validation runs regardless of user_id
+    """
+    repo = get_validation_repo()
+    
+    if not repo:
+        await cl.Message(content="⚠️ History feature requires MongoDB configuration.").send()
         return
     
-    history_text = "### Your Validation History\n\n"
-    for i, item in enumerate(reversed(history[-10:]), 1):  # Last 10
-        history_text += f"{i}. **{item['result']['target']}** - "
-        history_text += f"Score: {item['result']['score']}/100 - "
-        history_text += f"Status: {item['result']['status']}\n"
-        history_text += f"   Time: {item['timestamp']}\n\n"
-    
-    await cl.Message(content=history_text).send()
+    try:
+        user_id = session.get("user_id", "anonymous")
+        
+        if show_all:
+            # Fetch all validation runs
+            logger.info("Fetching all validation runs")
+            if repo.db is not None:
+                cursor = repo.db.validation_runs.find({}).sort("created_at", -1).limit(50)
+                history = []
+                async for run in cursor:
+                    run["_id"] = str(run["_id"])
+                    history.append(run)
+                logger.info(f"Found {len(history)} total validation runs")
+            else:
+                history = []
+        else:
+            # Fetch runs for this user only
+            logger.info(f"Fetching history for user_id: {user_id}")
+            history = await repo.list_validation_runs(user_id=user_id, limit=50)
+            logger.info(f"Found {len(history)} validation runs for user {user_id}")
+        
+        if not history:
+            # Try fetching all runs to see if there are any
+            if repo.db is not None:
+                all_runs = await repo.db.validation_runs.count_documents({})
+                if show_all:
+                    await cl.Message(content="No validation history in database yet.").send()
+                else:
+                    await cl.Message(
+                        content=f"No validation history for user '{user_id}'.\n\n"
+                                f"Total runs in database: {all_runs}\n\n"
+                                f"💡 Tip: Type 'history all' to see all validation runs."
+                    ).send()
+            else:
+                await cl.Message(content="No validation history yet.").send()
+            return
+        
+        if show_all:
+            history_text = "### 📊 All Validation History (Last 50)\n\n"
+        else:
+            history_text = "### 📊 Your Validation History (Last 50)\n\n"
+        for i, run in enumerate(history, 1):
+            created_at = run.get('created_at', 'Unknown')
+            if hasattr(created_at, 'strftime'):
+                time_str = created_at.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                time_str = str(created_at)
+            
+            history_text += f"**{i}. {run.get('target_host', 'Unknown')}**\n"
+            history_text += f"   - Score: {run.get('score', 0)}/100\n"
+            history_text += f"   - Status: {run.get('status', 'unknown').upper()}\n"
+            history_text += f"   - Time: {time_str}\n"
+            history_text += f"   - Duration: {run.get('execution_time_seconds', 0):.1f}s\n\n"
+        
+        await cl.Message(content=history_text).send()
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch history: {e}")
+        await cl.Message(content=f"❌ Failed to fetch history: {str(e)}").send()
 
 
-async def show_statistics(session: dict):
-    """Show validation statistics."""
-    history = session.get("validation_history", [])
+async def show_statistics(session: dict, show_all: bool = False):
+    """Show validation statistics from MongoDB.
     
-    if not history:
-        await cl.Message(content="No validation data yet.").send()
+    Args:
+        session: User session dictionary
+        show_all: If True, show statistics for all users
+    """
+    repo = get_validation_repo()
+    
+    if not repo:
+        await cl.Message(content="⚠️ Statistics feature requires MongoDB configuration.").send()
         return
     
-    scores = [item['result']['score'] for item in history]
-    avg_score = sum(scores) / len(scores)
-    
-    stats_text = f"""### Validation Statistics
+    try:
+        user_id = session.get("user_id", "anonymous")
+        
+        if show_all:
+            # Get statistics for all users
+            logger.info("Fetching statistics for all users")
+            if repo.db is not None:
+                # Custom aggregation for all users
+                pipeline = [
+                    {
+                        "$group": {
+                            "_id": None,
+                            "total_validations": {"$sum": 1},
+                            "average_score": {"$avg": "$score"},
+                            "max_score": {"$max": "$score"},
+                            "min_score": {"$min": "$score"},
+                            "successful_validations": {
+                                "$sum": {
+                                    "$cond": [{"$eq": ["$workflow_status", "success"]}, 1, 0]
+                                }
+                            },
+                            "failed_validations": {
+                                "$sum": {
+                                    "$cond": [{"$eq": ["$workflow_status", "failed"]}, 1, 0]
+                                }
+                            }
+                        }
+                    }
+                ]
+                cursor = repo.db.validation_runs.aggregate(pipeline)
+                results = await cursor.to_list(length=1)
+                stats = results[0] if results else {}
+            else:
+                stats = {}
+        else:
+            # Get statistics for current user only
+            stats_result = await repo.get_validation_statistics(user_id=user_id, time_range="30d")
+            
+            # Extract stats from aggregation result
+            if not stats_result or not stats_result.get('total_stats'):
+                await cl.Message(
+                    content=f"No validation data for user '{user_id}'.\n\n"
+                            f"💡 Tip: Type 'stats all' to see statistics for all validation runs."
+                ).send()
+                return
+            
+            stats = stats_result['total_stats'][0] if stats_result['total_stats'] else {}
+        
+        if not stats or stats.get('total_validations', 0) == 0:
+            if show_all:
+                await cl.Message(content="No validation data in database yet.").send()
+            else:
+                await cl.Message(
+                    content=f"No validation data for user '{user_id}'.\n\n"
+                            f"💡 Tip: Type 'stats all' to see statistics for all validation runs."
+                ).send()
+            return
+        
+        if not stats or stats.get('total_validations', 0) == 0:
+            await cl.Message(content="No validation data yet.").send()
+            return
+        
+        total = stats.get('total_validations', 0)
+        successful = stats.get('successful_validations', 0)
+        success_rate = (successful / total * 100) if total > 0 else 0
+        
+        if show_all:
+            stats_text = f"""### 📈 Validation Statistics (All Users, All Time)
 
-**Total Validations:** {len(history)}  
-**Average Score:** {avg_score:.1f}/100  
-**Highest Score:** {max(scores)}/100  
-**Lowest Score:** {min(scores)}/100
+**Total Validations:** {total}
+**Average Score:** {stats.get('average_score', 0):.1f}/100
+**Highest Score:** {stats.get('max_score', 0)}/100
+**Lowest Score:** {stats.get('min_score', 0)}/100
+**Success Rate:** {success_rate:.1f}%
+
+**Status Breakdown:**
+- ✅ Successful: {successful}
+- ❌ Failed: {stats.get('failed_validations', 0)}
 """
-    
-    await cl.Message(content=stats_text).send()
+        else:
+            stats_text = f"""### 📈 Validation Statistics (Last 30 Days)
 
+**Total Validations:** {total}
+**Average Score:** {stats.get('average_score', 0):.1f}/100
+**Highest Score:** {stats.get('max_score', 0)}/100
+**Lowest Score:** {stats.get('min_score', 0)}/100
+**Success Rate:** {success_rate:.1f}%
 
-async def show_tools(session: dict):
-    """Show available MCP tools."""
-    mcp_client = session.get("mcp_client")
-    
-    if not mcp_client or not mcp_client.is_connected():
-        await cl.Message(content="❌ MCP client not connected").send()
-        return
-    
-    tools = mcp_client.list_tools()
-    
-    if not tools:
-        await cl.Message(content="No tools discovered").send()
-        return
-    
-    tools_text = f"### 🔧 Discovered MCP Tools ({len(tools)} total)\n\n"
-    
-    for i, tool in enumerate(tools, 1):
-        tools_text += f"**{i}. {tool.name}**\n"
-        tools_text += f"   {tool.description[:80]}...\n\n"
-    
-    await cl.Message(content=tools_text).send()
-
-
-async def show_tool_info(session: dict, tool_name: str):
-    """Show detailed tool information."""
-    mcp_client = session.get("mcp_client")
-    
-    if not mcp_client or not mcp_client.is_connected():
-        await cl.Message(content="❌ MCP client not connected").send()
-        return
-    
-    info = mcp_client.get_tool_info(tool_name)
-    
-    if not info:
-        await cl.Message(content=f"❌ Tool '{tool_name}' not found").send()
-        return
-    
-    info_text = f"### 🔍 Tool: {info['name']}\n\n"
-    info_text += f"**Description:**\n{info['description']}\n\n"
-    
-    if info['required_parameters']:
-        info_text += "**Required Parameters:**\n"
-        for param in info['required_parameters']:
-            info_text += f"- `{param}`\n"
-    
-    await cl.Message(content=info_text).send()
+**Status Breakdown:**
+- ✅ Successful: {successful}
+- ❌ Failed: {stats.get('failed_validations', 0)}
+"""
+        
+        await cl.Message(content=stats_text).send()
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch statistics: {e}")
+        await cl.Message(content=f"❌ Failed to fetch statistics: {str(e)}").send()
 
 
 async def list_credentials(session: dict):
@@ -493,7 +630,7 @@ async def end():
     
     logger.info(f"Session end: {session_id}")
     
-    # Cleanup session
+    # Cleanup session (MCP is managed by orchestrator)
     session_manager = get_session_manager()
     await session_manager.cleanup_session(session_id)
     
