@@ -38,6 +38,9 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 # Dynamic MCP Integration
 from agents.mcp_dynamic import DynamicMCPClient
 
+# Telemetry imports
+from agents.telemetry import trace_operation_async, get_telemetry
+
 # Local imports
 from models import (
     ValidationRequest,
@@ -384,284 +387,324 @@ class ValidationOrchestrator:
         logger.info(f"Starting validation workflow for {request.resource_info.host}")
         logger.info(f"Resource type: {request.resource_info.resource_type.value}")
         
-        try:
-            # Phase 1: Workload Discovery (optional)
-            discovery_result = None
-            classification = None
-            
-            if self.enable_discovery and request.auto_discover:
-                state.current_phase = "discovery"
-                state.phase_start_time = time.time()
+        # Wrap entire workflow in telemetry trace
+        async with trace_operation_async(
+            "validation_workflow",
+            attributes={
+                "host": request.resource_info.host,
+                "resource_type": request.resource_info.resource_type.value,
+                "enable_discovery": str(self.enable_discovery),
+                "enable_evaluation": str(self.enable_ai_evaluation)
+            }
+        ):
+            try:
+                # Phase 1: Workload Discovery (optional)
+                discovery_result = None
+                classification = None
                 
-                try:
-                    logger.info("=" * 60)
-                    logger.info("PHASE 1: Workload Discovery")
-                    logger.info("=" * 60)
-                    if wf_tracker:
-                        wf_tracker.mode(
-                            "discovery",
-                            description="Scanning ports, processes and applications on the target host"
-                        )
-                        wf_tracker.info("Phase 1: Workload Discovery — scanning ports, processes, applications")
+                if self.enable_discovery and request.auto_discover:
+                    state.current_phase = "discovery"
+                    state.phase_start_time = time.time()
                     
-                    discovery_result = await self._execute_discovery_phase(
-                        request.resource_info
-                    )
-                    
-                    phase_timings["discovery"] = time.time() - state.phase_start_time
-                    state.completed_phases.append("discovery")
-                    
-                    # Classify resource based on discovery
-                    if discovery_result and self._classifier is not None:
-                        logger.info("Classifying resource based on discovery results...")
-                        classification = self._classifier.classify(discovery_result)
-                        logger.info(
-                            f"✓ Resource classified as: {classification.category.value} "
-                            f"(confidence: {classification.confidence:.2%})"
-                        )
+                    try:
+                        logger.info("=" * 60)
+                        logger.info("PHASE 1: Workload Discovery")
+                        logger.info("=" * 60)
                         if wf_tracker:
-                            wf_tracker.thinking(
-                                f"Detected {len(discovery_result.applications) if discovery_result else 0} "
-                                f"application(s) — classifying resource type..."
+                            wf_tracker.mode(
+                                "discovery",
+                                description="Scanning ports, processes and applications on the target host"
                             )
-                            
-                            # Build classification reasoning
-                            reasoning_parts = [
-                                f"Classified as {classification.category.value} (confidence: {classification.confidence:.0%})"
-                            ]
-                            
-                            if classification.primary_application:
-                                reasoning_parts.append(
-                                    f"Primary application: {classification.primary_application.name}"
+                            wf_tracker.info("Phase 1: Workload Discovery — scanning ports, processes, applications")
+                        
+                        # Trace discovery phase
+                        async with trace_operation_async(
+                            "discovery_phase",
+                            attributes={"host": request.resource_info.host}
+                        ):
+                            discovery_result = await self._execute_discovery_phase(
+                                request.resource_info
+                            )
+                        
+                        phase_timings["discovery"] = time.time() - state.phase_start_time
+                        state.completed_phases.append("discovery")
+                        
+                        # Classify resource based on discovery
+                        if discovery_result and self._classifier is not None:
+                            logger.info("Classifying resource based on discovery results...")
+                            classification = self._classifier.classify(discovery_result)
+                            logger.info(
+                                f"✓ Resource classified as: {classification.category.value} "
+                                f"(confidence: {classification.confidence:.2%})"
+                            )
+                            if wf_tracker:
+                                wf_tracker.thinking(
+                                    f"Detected {len(discovery_result.applications) if discovery_result else 0} "
+                                    f"application(s) — classifying resource type..."
                                 )
                                 
-                                # Add evidence if available
-                                if classification.primary_application.evidence:
-                                    evidence = classification.primary_application.evidence
-                                    evidence_items = []
-                                    if 'ports' in evidence:
-                                        evidence_items.append(f"ports {evidence['ports']}")
-                                    if 'processes' in evidence:
-                                        evidence_items.append(f"processes: {evidence['processes']}")
-                                    if 'signatures' in evidence:
-                                        evidence_items.append(f"signatures matched")
+                                # Build classification reasoning
+                                reasoning_parts = [
+                                    f"Classified as {classification.category.value} (confidence: {classification.confidence:.0%})"
+                                ]
+                                
+                                if classification.primary_application:
+                                    reasoning_parts.append(
+                                        f"Primary application: {classification.primary_application.name}"
+                                    )
                                     
-                                    if evidence_items:
-                                        reasoning_parts.append(f"Evidence: {', '.join(evidence_items)}")
-                            
-                            wf_tracker.decision(
-                                " | ".join(reasoning_parts),
-                                confidence=classification.confidence,
-                            )
-                    
-                except Exception as e:
-                    error_msg = f"Discovery phase failed: {e}"
-                    logger.error(error_msg)
-                    errors.append(error_msg)
-                    if wf_tracker:
-                        wf_tracker.warning(f"Discovery failed: {e} — continuing with fallback plan")
-                    phase_timings["discovery"] = time.time() - state.phase_start_time
-            
-            # Phase 2: Validation Planning
-            state.current_phase = "planning"
-            state.phase_start_time = time.time()
-            
-            logger.info("=" * 60)
-            logger.info("PHASE 2: Validation Planning")
-            logger.info("=" * 60)
-            if wf_tracker:
-                wf_tracker.mode(
-                    "planning",
-                    description="Mapping detected workloads to the right validation checks"
-                )
-                wf_tracker.info("Phase 2: Validation Planning — building check list")
-            
-            validation_plan = await self._execute_planning_phase(
-                request.resource_info,
-                classification
-            )
-            
-            phase_timings["planning"] = time.time() - state.phase_start_time
-            state.completed_phases.append("planning")
-            
-            logger.info(f"✓ Validation plan created with {len(validation_plan.checks)} checks")
-            if wf_tracker:
-                check_names = ", ".join(c.mcp_tool for c in validation_plan.checks)
-                wf_tracker.decision(
-                    f"Plan: {len(validation_plan.checks)} checks → {check_names}"
-                )
-            
-            # Phase 3: Validation Execution
-            state.current_phase = "execution"
-            state.phase_start_time = time.time()
-            
-            logger.info("=" * 60)
-            logger.info("PHASE 3: Validation Execution")
-            logger.info("=" * 60)
-            if wf_tracker:
-                wf_tracker.mode(
-                    "validation",
-                    description="Running checks and collecting results from the target host"
-                )
-                wf_tracker.info(f"Phase 3: Executing {len(validation_plan.checks)} validation checks")
-            
-            validation_result = await self._execute_validation_phase(
-                request,
-                validation_plan,
-                discovery_result
-            )
-            
-            phase_timings["execution"] = time.time() - state.phase_start_time
-            state.completed_phases.append("execution")
-            
-            logger.info(
-                f"✓ Validations complete: {validation_result.passed_checks} passed, "
-                f"{validation_result.failed_checks} failed, "
-                f"{validation_result.warning_checks} warnings"
-            )
-            if wf_tracker:
-                wf_tracker.info(
-                    f"Phase 3 done: ✅ {validation_result.passed_checks} passed  "
-                    f"❌ {validation_result.failed_checks} failed  "
-                    f"⚠️  {validation_result.warning_checks} warnings"
-                )
-            
-            # Phase 4: AI Evaluation (optional)
-            evaluation = None
-            
-            if self.enable_ai_evaluation:
-                state.current_phase = "evaluation"
+                                    # Add evidence if available
+                                    if classification.primary_application.evidence:
+                                        evidence = classification.primary_application.evidence
+                                        evidence_items = []
+                                        if 'ports' in evidence:
+                                            evidence_items.append(f"ports {evidence['ports']}")
+                                        if 'processes' in evidence:
+                                            evidence_items.append(f"processes: {evidence['processes']}")
+                                        if 'signatures' in evidence:
+                                            evidence_items.append(f"signatures matched")
+                                        
+                                        if evidence_items:
+                                            reasoning_parts.append(f"Evidence: {', '.join(evidence_items)}")
+                                
+                                wf_tracker.decision(
+                                    " | ".join(reasoning_parts),
+                                    confidence=classification.confidence,
+                                )
+                        
+                    except Exception as e:
+                        error_msg = f"Discovery phase failed: {e}"
+                        logger.error(error_msg)
+                        errors.append(error_msg)
+                        if wf_tracker:
+                            wf_tracker.warning(f"Discovery failed: {e} — continuing with fallback plan")
+                        phase_timings["discovery"] = time.time() - state.phase_start_time
+                
+                # Phase 2: Validation Planning
+                state.current_phase = "planning"
                 state.phase_start_time = time.time()
                 
-                try:
-                    logger.info("=" * 60)
-                    logger.info("PHASE 4: AI Evaluation")
-                    logger.info("=" * 60)
-                    if wf_tracker:
-                        wf_tracker.mode(
-                            "evaluation",
-                            description="Analysing results, identifying issues and generating recommendations"
-                        )
-                        wf_tracker.info("Phase 4: Evaluation — analysing results and generating recommendations")
-                    
-                    evaluation = await self._execute_evaluation_phase(
-                        validation_result,
-                        discovery_result,
+                logger.info("=" * 60)
+                logger.info("PHASE 2: Validation Planning")
+                logger.info("=" * 60)
+                if wf_tracker:
+                    wf_tracker.mode(
+                        "planning",
+                        description="Mapping detected workloads to the right validation checks"
+                    )
+                    wf_tracker.info("Phase 2: Validation Planning — building check list")
+                
+                # Trace planning phase
+                async with trace_operation_async(
+                    "planning_phase",
+                    attributes={
+                        "host": request.resource_info.host,
+                        "has_classification": str(classification is not None)
+                    }
+                ):
+                    validation_plan = await self._execute_planning_phase(
+                        request.resource_info,
                         classification
                     )
-                    
-                    phase_timings["evaluation"] = time.time() - state.phase_start_time
-                    state.completed_phases.append("evaluation")
-                    
-                    logger.info(f"✓ Evaluation complete: {evaluation.overall_health}")
-                    logger.info(f"  Critical issues: {len(evaluation.critical_issues)}")
-                    logger.info(f"  Recommendations: {len(evaluation.recommendations)}")
-                    if wf_tracker:
-                        wf_tracker.thinking("Analysing check results, identifying root causes...")
-                        wf_tracker.decision(
-                            f"Health: {evaluation.overall_health.upper()}  "
-                            f"Issues: {len(evaluation.critical_issues)}  "
-                            f"Recommendations: {len(evaluation.recommendations)}"
-                        )
-                    
-                except Exception as e:
-                    error_msg = f"Evaluation phase failed: {e}"
-                    logger.error(error_msg)
-                    errors.append(error_msg)
-                    if wf_tracker:
-                        wf_tracker.warning(f"Evaluation failed: {e}")
-                    phase_timings["evaluation"] = time.time() - state.phase_start_time
-            
-            # Determine workflow status
-            workflow_status = self._determine_workflow_status(
-                validation_result,
-                errors
-            )
-            
-            total_time = time.time() - state.start_time
-            
-            # Create workflow result with planning metrics
-            planning_metrics_summary = None
-            if validation_plan and validation_plan.metrics:
-                planning_metrics_summary = PlanningMetricsSummary(
-                    planner_used=validation_plan.metrics.planner_used,
-                    planning_time_ms=validation_plan.metrics.planning_time_ms,
-                    llm_model=validation_plan.metrics.llm_model,
-                    num_checks=validation_plan.metrics.num_checks,
-                    num_priority_checks=validation_plan.metrics.num_priority_checks,
-                    tool_names=validation_plan.metrics.tool_names,
-                    fallback_reason=validation_plan.metrics.fallback_reason,
-                    resource_category=classification.category.value if classification else "unknown",
-                    timestamp=validation_plan.metrics.timestamp
+                
+                phase_timings["planning"] = time.time() - state.phase_start_time
+                state.completed_phases.append("planning")
+                
+                logger.info(f"✓ Validation plan created with {len(validation_plan.checks)} checks")
+                if wf_tracker:
+                    check_names = ", ".join(c.mcp_tool for c in validation_plan.checks)
+                    wf_tracker.decision(
+                        f"Plan: {len(validation_plan.checks)} checks → {check_names}"
+                    )
+                
+                # Phase 3: Validation Execution
+                state.current_phase = "execution"
+                state.phase_start_time = time.time()
+                
+                logger.info("=" * 60)
+                logger.info("PHASE 3: Validation Execution")
+                logger.info("=" * 60)
+                if wf_tracker:
+                    wf_tracker.mode(
+                        "validation",
+                        description="Running checks and collecting results from the target host"
+                    )
+                    wf_tracker.info(f"Phase 3: Executing {len(validation_plan.checks)} validation checks")
+                
+                # Trace execution phase
+                async with trace_operation_async(
+                    "execution_phase",
+                    attributes={
+                        "host": request.resource_info.host,
+                        "num_checks": str(len(validation_plan.checks))
+                    }
+                ):
+                    validation_result = await self._execute_validation_phase(
+                        request,
+                        validation_plan,
+                        discovery_result
+                    )
+                
+                phase_timings["execution"] = time.time() - state.phase_start_time
+                state.completed_phases.append("execution")
+                
+                logger.info(
+                    f"✓ Validations complete: {validation_result.passed_checks} passed, "
+                    f"{validation_result.failed_checks} failed, "
+                    f"{validation_result.warning_checks} warnings"
                 )
-            
-            result = WorkflowResult(
-                request=request,
-                discovery_result=discovery_result,
-                classification=classification,
-                validation_plan=validation_plan,
-                validation_result=validation_result,
-                evaluation=evaluation,
-                execution_time_seconds=total_time,
-                workflow_status=workflow_status,
-                errors=errors,
-                phase_timings=phase_timings,
-                planning_metrics=planning_metrics_summary
-            )
-            
-            logger.info("=" * 60)
-            logger.info(f"WORKFLOW COMPLETE: {workflow_status.upper()}")
-            logger.info(f"Total execution time: {total_time:.2f}s")
-            logger.info(f"Completed phases: {', '.join(state.completed_phases)}")
-            
-            # Log planning metrics summary
-            if planning_metrics_summary:
-                logger.info("")
-                logger.info("Planning Metrics:")
-                logger.info(f"  Planner used: {planning_metrics_summary.planner_used}")
-                logger.info(f"  Planning time: {planning_metrics_summary.planning_time_ms}ms")
-                logger.info(f"  Checks generated: {planning_metrics_summary.num_checks}")
-                logger.info(f"  Priority checks: {planning_metrics_summary.num_priority_checks}")
-                if planning_metrics_summary.llm_model:
-                    logger.info(f"  LLM model: {planning_metrics_summary.llm_model}")
-                if planning_metrics_summary.fallback_reason:
-                    logger.info(f"  Fallback reason: {planning_metrics_summary.fallback_reason}")
-            
-            logger.info("=" * 60)
-            if wf_tracker:
-                wf_tracker.finish(
-                    f"Workflow {workflow_status.upper()} — score: {validation_result.score}/100 "
-                    f"({total_time:.1f}s)",
-                    success=workflow_status in ("success", "partial_success"),
+                if wf_tracker:
+                    wf_tracker.info(
+                        f"Phase 3 done: ✅ {validation_result.passed_checks} passed  "
+                        f"❌ {validation_result.failed_checks} failed  "
+                        f"⚠️  {validation_result.warning_checks} warnings"
+                    )
+                
+                # Phase 4: AI Evaluation (optional)
+                evaluation = None
+                
+                if self.enable_ai_evaluation:
+                    state.current_phase = "evaluation"
+                    state.phase_start_time = time.time()
+                    
+                    try:
+                        logger.info("=" * 60)
+                        logger.info("PHASE 4: AI Evaluation")
+                        logger.info("=" * 60)
+                        if wf_tracker:
+                            wf_tracker.mode(
+                                "evaluation",
+                                description="Analysing results, identifying issues and generating recommendations"
+                            )
+                            wf_tracker.info("Phase 4: Evaluation — analysing results and generating recommendations")
+                        
+                        # Trace evaluation phase
+                        async with trace_operation_async(
+                            "evaluation_phase",
+                            attributes={
+                                "host": request.resource_info.host,
+                                "passed_checks": str(validation_result.passed_checks),
+                                "failed_checks": str(validation_result.failed_checks)
+                            }
+                        ):
+                            evaluation = await self._execute_evaluation_phase(
+                                validation_result,
+                                discovery_result,
+                                classification
+                            )
+                        
+                        phase_timings["evaluation"] = time.time() - state.phase_start_time
+                        state.completed_phases.append("evaluation")
+                        
+                        logger.info(f"✓ Evaluation complete: {evaluation.overall_health}")
+                        logger.info(f"  Critical issues: {len(evaluation.critical_issues)}")
+                        logger.info(f"  Recommendations: {len(evaluation.recommendations)}")
+                        if wf_tracker:
+                            wf_tracker.thinking("Analysing check results, identifying root causes...")
+                            wf_tracker.decision(
+                                f"Health: {evaluation.overall_health.upper()}  "
+                                f"Issues: {len(evaluation.critical_issues)}  "
+                                f"Recommendations: {len(evaluation.recommendations)}"
+                            )
+                        
+                    except Exception as e:
+                        error_msg = f"Evaluation phase failed: {e}"
+                        logger.error(error_msg)
+                        errors.append(error_msg)
+                        if wf_tracker:
+                            wf_tracker.warning(f"Evaluation failed: {e}")
+                        phase_timings["evaluation"] = time.time() - state.phase_start_time
+                
+                # Determine workflow status
+                workflow_status = self._determine_workflow_status(
+                    validation_result,
+                    errors
                 )
-            
-            return result
-            
-        except Exception as e:
-            total_time = time.time() - state.start_time
-            error_msg = f"Workflow failed critically: {e}"
-            logger.error(error_msg, exc_info=True)
-            errors.append(error_msg)
-            
-            # Create minimal failure result
-            validation_result = ResourceValidationResult(
-                resource_type=request.resource_info.resource_type,
-                resource_host=request.resource_info.host,
-                overall_status=ValidationStatus.ERROR,
-                score=0,
-                checks=[],
-                execution_time_seconds=total_time,
-                timestamp=datetime.now()
-            )
-            
-            return WorkflowResult(
-                request=request,
-                validation_result=validation_result,
-                execution_time_seconds=total_time,
-                workflow_status="failure",
-                errors=errors,
-                phase_timings=phase_timings
-            )
+                
+                total_time = time.time() - state.start_time
+                
+                # Create workflow result with planning metrics
+                planning_metrics_summary = None
+                if validation_plan and validation_plan.metrics:
+                    planning_metrics_summary = PlanningMetricsSummary(
+                        planner_used=validation_plan.metrics.planner_used,
+                        planning_time_ms=validation_plan.metrics.planning_time_ms,
+                        llm_model=validation_plan.metrics.llm_model,
+                        num_checks=validation_plan.metrics.num_checks,
+                        num_priority_checks=validation_plan.metrics.num_priority_checks,
+                        tool_names=validation_plan.metrics.tool_names,
+                        fallback_reason=validation_plan.metrics.fallback_reason,
+                        resource_category=classification.category.value if classification else "unknown",
+                        timestamp=validation_plan.metrics.timestamp
+                    )
+                
+                result = WorkflowResult(
+                    request=request,
+                    discovery_result=discovery_result,
+                    classification=classification,
+                    validation_plan=validation_plan,
+                    validation_result=validation_result,
+                    evaluation=evaluation,
+                    execution_time_seconds=total_time,
+                    workflow_status=workflow_status,
+                    errors=errors,
+                    phase_timings=phase_timings,
+                    planning_metrics=planning_metrics_summary
+                )
+                
+                logger.info("=" * 60)
+                logger.info(f"WORKFLOW COMPLETE: {workflow_status.upper()}")
+                logger.info(f"Total execution time: {total_time:.2f}s")
+                logger.info(f"Completed phases: {', '.join(state.completed_phases)}")
+                
+                # Log planning metrics summary
+                if planning_metrics_summary:
+                    logger.info("")
+                    logger.info("Planning Metrics:")
+                    logger.info(f"  Planner used: {planning_metrics_summary.planner_used}")
+                    logger.info(f"  Planning time: {planning_metrics_summary.planning_time_ms}ms")
+                    logger.info(f"  Checks generated: {planning_metrics_summary.num_checks}")
+                    logger.info(f"  Priority checks: {planning_metrics_summary.num_priority_checks}")
+                    if planning_metrics_summary.llm_model:
+                        logger.info(f"  LLM model: {planning_metrics_summary.llm_model}")
+                    if planning_metrics_summary.fallback_reason:
+                        logger.info(f"  Fallback reason: {planning_metrics_summary.fallback_reason}")
+                
+                logger.info("=" * 60)
+                if wf_tracker:
+                    wf_tracker.finish(
+                        f"Workflow {workflow_status.upper()} — score: {validation_result.score}/100 "
+                        f"({total_time:.1f}s)",
+                        success=workflow_status in ("success", "partial_success"),
+                    )
+                
+                return result
+                    
+            except Exception as e:
+                total_time = time.time() - state.start_time
+                error_msg = f"Workflow failed critically: {e}"
+                logger.error(error_msg, exc_info=True)
+                errors.append(error_msg)
+                
+                # Create minimal failure result
+                validation_result = ResourceValidationResult(
+                    resource_type=request.resource_info.resource_type,
+                    resource_host=request.resource_info.host,
+                    overall_status=ValidationStatus.ERROR,
+                    score=0,
+                    checks=[],
+                    execution_time_seconds=total_time,
+                    timestamp=datetime.now()
+                )
+                
+                return WorkflowResult(
+                    request=request,
+                    validation_result=validation_result,
+                    execution_time_seconds=total_time,
+                    workflow_status="failure",
+                    errors=errors,
+                    phase_timings=phase_timings
+                )
     
     async def _execute_discovery_phase(
         self,

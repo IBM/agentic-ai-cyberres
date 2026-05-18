@@ -5278,6 +5278,7 @@ dependencies = [
     { name = "anthropic" },
     { name = "chainlit" },
     { name = "colorama" },
+    { name = "fastapi" },
     { name = "google-generativeai" },
     { name = "groq" },
     { name = "httpx" },
@@ -5292,6 +5293,7 @@ dependencies = [
     { name = "pymongo" },
     { name = "python-dotenv" },
     { name = "sendgrid" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -5309,6 +5311,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.18.0" },
     { name = "chainlit", specifier = ">=2.11.1" },
     { name = "colorama", specifier = ">=0.4.6" },
+    { name = "fastapi", specifier = ">=0.136.1" },
     { name = "google-generativeai", specifier = ">=0.3.0" },
     { name = "groq", specifier = ">=0.31.0" },
     { name = "httpx", specifier = ">=0.27.0" },
@@ -5323,6 +5326,7 @@ requires-dist = [
     { name = "pymongo", specifier = ">=4.6.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "sendgrid", specifier = ">=6.12.5" },
+    { name = "uvicorn", specifier = ">=0.40.0" },
 ]
 
 [package.metadata.requires-dev]

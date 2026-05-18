@@ -95,6 +95,7 @@ class MCPConnectionManager:
         self._health_check_task: Optional[asyncio.Task] = None
         self._reconnect_attempts = 0
         self._last_error: Optional[str] = None
+        self._context_task_id: Optional[int] = None  # Track task that entered context
         
         logger.info(f"Connection manager initialized for {config.server_path}")
     
@@ -190,25 +191,44 @@ class MCPConnectionManager:
                 pass
             self._health_check_task = None
         
+        # Check if we're in the same task that entered the context
+        current_task_id = id(asyncio.current_task())
+        same_task = (self._context_task_id == current_task_id)
+        
         # Close session
         if self._session:
             try:
-                await self._session.__aexit__(None, None, None)
+                if same_task:
+                    # Safe to use __aexit__ in same task
+                    await self._session.__aexit__(None, None, None)
+                else:
+                    # Different task - just set to None and let it cleanup naturally
+                    logger.debug("Session cleanup deferred (different task)")
             except Exception as e:
-                logger.warning(f"Error closing session: {e}")
+                # Suppress cancel scope errors during shutdown
+                if "cancel scope" not in str(e).lower():
+                    logger.warning(f"Error closing session: {e}")
             self._session = None
         
         # Close client context
         if self._client_context:
             try:
-                await self._client_context.__aexit__(None, None, None)
+                if same_task:
+                    # Safe to use __aexit__ in same task
+                    await self._client_context.__aexit__(None, None, None)
+                else:
+                    # Different task - just set to None
+                    logger.debug("Client context cleanup deferred (different task)")
             except Exception as e:
-                logger.warning(f"Error closing client context: {e}")
+                # Suppress cancel scope errors during shutdown
+                if "cancel scope" not in str(e).lower():
+                    logger.warning(f"Error closing client context: {e}")
             self._client_context = None
         
         self._read_stream = None
         self._write_stream = None
         self._state = ConnectionState.DISCONNECTED
+        self._context_task_id = None
         
         logger.info("✓ Disconnected from MCP server")
     

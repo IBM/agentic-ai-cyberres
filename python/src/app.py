@@ -27,6 +27,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ── OpenTelemetry Instrumentation ──────────────────────────────────────────────
+from agents.telemetry import (
+    initialize_telemetry,
+    flush_telemetry,
+    shutdown_telemetry,
+    is_telemetry_enabled,
+)
+
+# Initialize telemetry on module load
+telemetry_enabled = os.getenv("ENABLE_TELEMETRY", "true").lower() == "true"
+if telemetry_enabled:
+    phoenix_base = os.getenv("PHOENIX_ENDPOINT", "http://localhost:6006")
+    phoenix_endpoint = phoenix_base.rstrip('/') + '/v1/traces'
+    
+    success = initialize_telemetry(
+        service_name="validation-service",
+        phoenix_endpoint=phoenix_endpoint,
+        enable_console_export=False,
+    )
+    
+    if success:
+        logger.info(f"✅ Telemetry initialized: validation-service → {phoenix_endpoint}")
+    else:
+        logger.warning("⚠️  Telemetry initialization failed, continuing without traces")
+else:
+    logger.info("📊 Telemetry disabled (set ENABLE_TELEMETRY=true to enable)")
+
 # Configuration
 MAX_MESSAGE_LENGTH = 1000
 RATE_LIMIT_REQUESTS = 10
@@ -93,7 +120,7 @@ async def start():
         
         # Welcome message
         await cl.Message(
-            content="""# 👋 Welcome to BeeAI Recovery Validation (Production)
+            content="""# 👋 Welcome to Infrastructure Recovery Validation Agent powered by BeeAI 
 
 I can help you validate infrastructure resources with enterprise-grade reliability.
 
@@ -629,6 +656,11 @@ async def end():
         return
     
     logger.info(f"Session end: {session_id}")
+    
+    # Flush telemetry before cleanup
+    if is_telemetry_enabled():
+        logger.info("Flushing telemetry spans...")
+        flush_telemetry()
     
     # Cleanup session (MCP is managed by orchestrator)
     session_manager = get_session_manager()
