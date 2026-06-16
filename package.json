@@ -17,18 +17,23 @@
     "test": "\"echo \\\"Error: no test specified\\\" && exit 1\""
   },
   "dependencies": {
+    "@ai-sdk/google-vertex": "^4.0.67",
+    "@ai-sdk/groq": "^3.0.25",
+    "@ai-sdk/openai": "^3.0.36",
     "@google-cloud/vertexai": "^1.9.2",
+    "@ibm-cloud/watsonx-ai": "^1.7.8",
     "axios": "^1.12.0",
-    "bee-agent-framework": "^0.0.61",
-    "beeai-framework": "^0.1.6",
+    "beeai-framework": "^0.1.26",
     "dotenv": "^16.4.5",
     "groq-sdk": "^0.7.0",
     "jsondiffpatch": "^0.7.2",
     "ollama": "^0.5.11",
+    "ollama-ai-provider-v2": "^3.3.1",
     "openai": "^4.77.0",
     "openai-chat-tokens": "^0.2.8",
     "pino-pretty": "^11.2.2",
-    "strip-ansi": "^7.1.0"
+    "strip-ansi": "^7.1.0",
+    "zod": "^3.25.76"
   },
   "overrides": {
     "jsondiffpatch": "^0.7.2"

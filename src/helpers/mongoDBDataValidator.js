@@ -11,6 +11,7 @@ use(mongoDBname);
 
 // Validate the collection
 print("Validating database " + mongoDBname + " and collection " + mongoDBcollection);
-const result = db.getCollection(mongoDBcollection).validate();
-printjson(result);
+const result = db.getCollection(mongoDBcollection).validate().valid;
+
+printjson(result); 
 
