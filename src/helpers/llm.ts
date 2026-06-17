@@ -1,16 +1,14 @@
 //
 // Copyright contributors to the agentic-ai-cyberres project
 //
-import { ChatLLM, ChatLLMOutput } from "bee-agent-framework/llms/chat";
-import { getEnv, parseEnv } from "bee-agent-framework/internals/env";
+import { ChatModel } from "beeai-framework/backend/chat";
+import { getEnv, parseEnv } from "beeai-framework/internals/env";
 import { z } from "zod";
-import { WatsonXChatLLM } from "bee-agent-framework/adapters/watsonx/chat";
-import { OpenAIChatLLM } from "bee-agent-framework/adapters/openai/chat";
-import { OllamaChatLLM } from "bee-agent-framework/adapters/ollama/chat";
-import { GroqChatLLM } from "bee-agent-framework/adapters/groq/chat";
-import { VertexAIChatLLM } from "bee-agent-framework/adapters/vertexai/chat";
-import { Ollama } from "ollama";
-import Groq from "groq-sdk";
+import { WatsonxChatModel } from "beeai-framework/adapters/watsonx/backend/chat";
+import { OpenAIChatModel } from "beeai-framework/adapters/openai/backend/chat";
+import { OllamaChatModel } from "beeai-framework/adapters/ollama/backend/chat";
+import { GroqChatModel } from "beeai-framework/adapters/groq/backend/chat";
+import { GoogleVertexChatModel } from "beeai-framework/adapters/google-vertex/backend/chat";
 
 export const Providers = {
   WATSONX: "watsonx",
@@ -22,57 +20,67 @@ export const Providers = {
 } as const;
 type Provider = (typeof Providers)[keyof typeof Providers];
 
-export const LLMFactories: Record<Provider, () => ChatLLM<ChatLLMOutput>> = {
+export const LLMFactories: Record<Provider, () => ChatModel> = {
   [Providers.GROQ]: () =>
-    new GroqChatLLM({
-      modelId: getEnv("GROQ_MODEL") || "llama-3.1-70b-versatile",
-      client: new Groq({
+    new GroqChatModel(
+      getEnv("GROQ_MODEL") || "llama-3.1-70b-versatile",
+      {
+        temperature: 0,
+      },
+      {
         apiKey: getEnv("GROQ_API_KEY"),
-      }),
-    }),
+      }
+    ),
   [Providers.OPENAI]: () =>
-    new OpenAIChatLLM({
-      modelId: getEnv("OPENAI_MODEL") || "gpt-4o",
-      parameters: {
+    new OpenAIChatModel(
+      getEnv("OPENAI_MODEL") || "gpt-4o",
+      {
         temperature: 0,
-        max_tokens: 2048,
-      },
-    }),
+        maxTokens: 2048,
+      }
+    ),
   [Providers.OLLAMA]: () =>
-    new OllamaChatLLM({
-      modelId: getEnv("OLLAMA_MODEL") || "llama3.1:8b",
-      parameters: {
+    new OllamaChatModel(
+      getEnv("OLLAMA_MODEL") || "llama3.1:8b",
+      {
         temperature: 0,
       },
-      client: new Ollama({
-        host: getEnv("OLLAMA_HOST"),
-      }),
-    }),
+      {
+        baseURL: getEnv("OLLAMA_HOST"),
+      }
+    ),
   [Providers.WATSONX]: () =>
-    WatsonXChatLLM.fromPreset(getEnv("WATSONX_MODEL") || "meta-llama/llama-3-1-70b-instruct", {
-      apiKey: getEnv("WATSONX_API_KEY"),
-      projectId: getEnv("WATSONX_PROJECT_ID"),
-      region: getEnv("WATSONX_REGION"),
-    }),
+    new WatsonxChatModel(
+      getEnv("WATSONX_MODEL") || "meta-llama/llama-3-1-70b-instruct",
+      {
+        apiKey: getEnv("WATSONX_API_KEY"),
+        projectId: getEnv("WATSONX_PROJECT_ID"),
+        region: getEnv("WATSONX_REGION"),
+      } as any
+    ),
   [Providers.AZURE]: () =>
-    new OpenAIChatLLM({
-      modelId: getEnv("OPENAI_MODEL") || "gpt-4o-mini",
-      azure: true,
-      parameters: {
+    new OpenAIChatModel(
+      getEnv("OPENAI_MODEL") || "gpt-4o-mini",
+      {
         temperature: 0,
-        max_tokens: 2048,
+        maxTokens: 2048,
       },
-    }),
+      {
+        azure: true,
+      }
+    ),
   [Providers.VERTEXAI]: () =>
-    new VertexAIChatLLM({
-      modelId: getEnv("VERTEXAI_MODEL") || "gemini-1.5-flash-001",
-      location: getEnv("VERTEXAI_LOCATION") || "us-central1",
-      project: getEnv("VERTEXAI_PROJECT"),
-      parameters: {},
-    }),
+    new GoogleVertexChatModel(
+      getEnv("VERTEXAI_MODEL") || "gemini-1.5-flash-001",
+      {},
+      {
+        location: getEnv("VERTEXAI_LOCATION") || "us-central1",
+        project: getEnv("VERTEXAI_PROJECT"),
+      }
+    ),
 };
 
-export function getChatLLM(provider?: Provider): ChatLLM<ChatLLMOutput> {
+export function getChatLLM(provider?: Provider): ChatModel {
   if (!provider) {
     provider = parseEnv("LLM_BACKEND", z.nativeEnum(Providers), Providers.OLLAMA);
   }
