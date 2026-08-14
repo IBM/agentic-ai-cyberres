@@ -9,20 +9,48 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.115.14",
-    "fastmcp>=2.10.6",
-    "mcp[cli]>=1.10.1",
+    # fastmcp>=3.2.0 fixes CVE-2025-62801 (command injection), CVE-2025-62800,
+    # CVE-2025-64340, GHSA-rww4-4w9c-7733, CVE-2025-69196, CVE-2025-66416
+    "fastmcp>=3.2.0",
+    # mcp>=1.28.1 fixes CVE-2025-66416 (DNS rebinding), CVE-2026-59950, CVE-2026-52869
+    "mcp[cli]>=1.28.1",
     "oracledb>=3.3.0",
+    # paramiko: no fix released for CVE-2026-44405 (SHA-1 in RSA keys);
+    # pin to latest available and prefer Ed25519/ECDSA keys in production
     "paramiko>=3.5.1",
     "pydantic>=2.11.7",
     "pymongo>=4.14.1",
-    "requests>=2.32.4",
+    # requests>=2.33.0 fixes CVE-2026-25645 (zip-path traversal in extract_zipped_paths)
+    "requests>=2.33.0",
     "uvicorn>=0.35.0",
-    "python-dotenv>=1.0.1",
+    # python-dotenv>=1.2.2 fixes CVE-2026-28684 (env-var injection via .env)
+    "python-dotenv>=1.2.2",
+    # --- transitive dependency floor pins to pull in CVE-fixed versions ---
+    # authlib>=1.6.12 fixes 11 CVEs (CSRF, JWK injection, JWE zip-bomb, etc.)
+    "authlib>=1.6.12",
+    # cryptography>=50.0.0 fixes 9 CVEs incl. OpenSSL bundled CVEs
+    "cryptography>=50.0.0",
+    # starlette>=1.3.1 fixes 9 CVEs (Host-header injection, path traversal, DoS)
+    "starlette>=1.3.1",
+    # python-multipart>=0.0.31 fixes 6 CVEs (path traversal, DoS, header parsing)
+    "python-multipart>=0.0.31",
+    # urllib3>=2.7.0 fixes 4 CVEs (cross-origin redirect, chunked-encoding DoS)
+    "urllib3>=2.7.0",
+    # idna>=3.15 fixes CVE-2026-45409 (incomplete fix for CVE-2024-3651)
+    "idna>=3.15",
+    # click>=8.3.3 fixes CVE-2026-7246 (command injection via click.edit)
+    "click>=8.3.3",
+    # pygments>=2.20.0 fixes CVE-2026-4539 (ReDoS in lexer)
+    "pygments>=2.20.0",
+    # pynacl>=1.6.2 fixes CVE-2025-69277 (libsodium untrusted-data misuse)
+    "pynacl>=1.6.2",
 ]
 
 [dependency-groups]
 dev = [
+    "bandit>=1.9.4",
     "cyberres-mcp",
+    "pip-audit>=2.10.1",
 ]
 
 [project.scripts]

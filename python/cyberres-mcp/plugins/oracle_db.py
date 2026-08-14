@@ -125,6 +125,9 @@ def attach(mcp):
                 )
             return err(msg, code="ORACLE_ERROR")
 
+    # Allowlist for lsnrctl_path: only a bare filename or an absolute path
+    _SAFE_PATH_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
+
     @mcp.tool()
     def db_oracle_discover_and_validate(
         ssh_host: str,
@@ -145,6 +148,11 @@ def attach(mcp):
         - If `oracle_user` and `oracle_password` are provided, attempts a connect
           to the first discovered service and returns basic instance info.
         """
+        if not _SAFE_PATH_RE.match(lsnrctl_path):
+            return err("Invalid lsnrctl_path: only alphanumeric characters, dots, slashes, and underscores are allowed", code="INPUT_ERROR")
+
+        safe_lsnrctl = shlex.quote(lsnrctl_path)
+
         # 1) Check for PMON to infer SIDs
         rc, pmon_out, pmon_err = run_ssh_command(
             host=ssh_host,
@@ -153,8 +161,6 @@ def attach(mcp):
             key_path=ssh_key_path,
             command="ps -ef | egrep 'ora_pmon_|pmon' | grep -v grep || true",
         )
-        # Sanitize host for logging
-        safe_host = shlex.quote(ssh_host)
         sids = []
         sid_re = re.compile(r"ora_pmon_([A-Za-z0-9_#$]+)")
         for line in pmon_out.splitlines():
@@ -163,14 +169,16 @@ def attach(mcp):
                 sids.append(m.group(1))
 
         # 2) Listener status (try status, then services)
-        cmd_prefix = "sudo -u oracle -H sh -lc '" if sudo_oracle else ""
-        cmd_suffix = "'" if sudo_oracle else ""
+        if sudo_oracle:
+            lsnr_cmd = f"sudo -u oracle -H sh -lc {shlex.quote(safe_lsnrctl + ' status || ' + safe_lsnrctl + ' services || true')}"
+        else:
+            lsnr_cmd = f"{safe_lsnrctl} status || {safe_lsnrctl} services || true"
         rc2, lsnr_out, lsnr_err = run_ssh_command(
             host=ssh_host,
             username=ssh_user,
             password=ssh_password,
             key_path=ssh_key_path,
-            command=f"{cmd_prefix}{lsnrctl_path} status || {lsnrctl_path} services || true{cmd_suffix}",
+            command=lsnr_cmd,
         )
         # Parse services and port
         services = []
@@ -191,12 +199,17 @@ def attach(mcp):
                 SETTINGS.oracle_listener_ora,
                 "/etc/oracle/listener.ora",
             ]:
+                safe_path = shlex.quote(path)
+                if sudo_oracle:
+                    cat_cmd = f"sudo -u oracle -H sh -lc {shlex.quote('cat ' + path + ' 2>/dev/null || true')}"
+                else:
+                    cat_cmd = f"cat {safe_path} 2>/dev/null || true"
                 rc3, out3, _ = run_ssh_command(
                     host=ssh_host,
                     username=ssh_user,
                     password=ssh_password,
                     key_path=ssh_key_path,
-                    command=f"{cmd_prefix}cat {path} 2>/dev/null || true{cmd_suffix}",
+                    command=cat_cmd,
                 )
                 for m in re.finditer(r"\(PORT=([0-9]+)\)", out3):
                     try:
@@ -207,12 +220,17 @@ def attach(mcp):
                 SETTINGS.oracle_tnsnames_ora,
                 "/etc/oracle/tnsnames.ora",
             ]:
+                safe_path = shlex.quote(path)
+                if sudo_oracle:
+                    cat_cmd = f"sudo -u oracle -H sh -lc {shlex.quote('cat ' + path + ' 2>/dev/null || true')}"
+                else:
+                    cat_cmd = f"cat {safe_path} 2>/dev/null || true"
                 rc4, out4, _ = run_ssh_command(
                     host=ssh_host,
                     username=ssh_user,
                     password=ssh_password,
                     key_path=ssh_key_path,
-                    command=f"{cmd_prefix}cat {path} 2>/dev/null || true{cmd_suffix}",
+                    command=cat_cmd,
                 )
                 for m in re.finditer(r"SERVICE_NAME\s*=\s*([A-Za-z0-9_.$-]+)", out4):
                     services.append(m.group(1))

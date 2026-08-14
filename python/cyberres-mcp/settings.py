@@ -46,7 +46,7 @@ class Settings(BaseModel):
         ``{oracle_home}/network/admin/tnsnames.ora``.
     """
 
-    host: str = os.getenv("MCP_HOST", "0.0.0.0")
+    host: str = os.getenv("MCP_HOST", "127.0.0.1")
     port: int = int(os.getenv("MCP_PORT", "8000"))
     transport: str = os.getenv("MCP_TRANSPORT", "streamable-http")
     secrets_file: str = os.getenv("SECRETS_FILE", "secrets.json")

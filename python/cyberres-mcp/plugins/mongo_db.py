@@ -12,9 +12,33 @@ issued. Errors are captured and returned to the caller.
 
 from typing import Dict, Any, Optional, Tuple
 import logging
+import os
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 import json, shlex
+
+
+def _make_ssh_client(known_hosts_path: Optional[str] = None):
+    """Return a Paramiko SSHClient that verifies host keys.
+
+    Loads ``known_hosts_path`` or ``~/.ssh/known_hosts`` when available,
+    and uses ``RejectPolicy`` so unknown hosts are refused instead of
+    silently accepted (avoids the AutoAddPolicy MITM risk).
+    """
+    import paramiko
+    from paramiko import SSHClient, RejectPolicy
+
+    client = SSHClient()
+    client.set_missing_host_key_policy(RejectPolicy())
+    default_kh = os.path.expanduser("~/.ssh/known_hosts")
+    path = known_hosts_path or (default_kh if os.path.isfile(default_kh) else None)
+    if path and os.path.isfile(path):
+        try:
+            client.load_host_keys(path)
+        except Exception:
+            pass
+    return client
+
 
 def run_ssh_command(
     host: str,
@@ -24,16 +48,15 @@ def run_ssh_command(
     command: str = "",
     port: int = 22,
     timeout: float = 10.0,
+    known_hosts_path: Optional[str] = None,
 ) -> Tuple[int, str, str]:
     """
     Minimal SSH exec helper using Paramiko.
     Returns (return_code, stdout, stderr) with UTF-8 decoded text.
     """
     import paramiko  # lazy import keeps module import-time light
-    from paramiko import SSHClient, AutoAddPolicy
 
-    client = SSHClient()
-    client.set_missing_host_key_policy(AutoAddPolicy())
+    client = _make_ssh_client(known_hosts_path)
 
     try:
         if key_path:
@@ -79,10 +102,10 @@ def _json_from_stdout(stdout: str):
 def _build_local_uri(mongo_user: Optional[str], mongo_password: Optional[str],
                      port: int, auth_db: str) -> str:
     if mongo_user and mongo_password:
-        # Note: credentials on the command line are visible to 'ps' on the remote host.
-        # Acceptable for a prototype; prefer key-based auth or local auth files in prod.
-        user = shlex.quote(mongo_user)
-        pwd = shlex.quote(mongo_password)
+        # Percent-encode credentials so they embed correctly in the URI.
+        from urllib.parse import quote as _pct
+        user = _pct(mongo_user, safe="")
+        pwd = _pct(mongo_password, safe="")
         return f"mongodb://{user}:{pwd}@127.0.0.1:{port}/{auth_db}?authSource={auth_db}"
     return f"mongodb://127.0.0.1:{port}/{auth_db}"
 
