@@ -40,8 +40,10 @@ def attach(mcp):
             Hostname or IP address to probe.
         ports : List[int]
             List of integer port numbers to attempt connections to.
+            Each port must be in the range 1–65535.
         timeout_s : float, optional
-            Timeout in seconds for each connection attempt.
+            Timeout in seconds for each connection attempt (clamped to
+            0.1–30 s to prevent instant failures or indefinite hangs).
 
         Returns
         -------
@@ -49,6 +51,15 @@ def attach(mcp):
             A dictionary containing the host, per-port results, and a
             boolean summarizing whether all ports were reachable.
         """
+        timeout_s = max(0.1, min(float(timeout_s), 30.0))
+
+        invalid_ports = [p for p in ports if not isinstance(p, int) or not (1 <= p <= 65535)]
+        if invalid_ports:
+            return resp_err(
+                f"Invalid port number(s): {invalid_ports}. Each port must be an integer 1–65535.",
+                code="INVALID_PORT",
+            )
+
         results = []
         for port in ports:
             start = time.time()

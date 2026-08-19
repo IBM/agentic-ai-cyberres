@@ -71,9 +71,7 @@ def create_app() -> FastMCP:
 
     app = FastMCP(
         "Recovery_Validation_MCP",
-        host=SETTINGS.host,
-        port=SETTINGS.port,
-        description=(
+        instructions=(
             "Validates recovered infrastructure resources including Linux VMs, "
             "Oracle databases, and MongoDB clusters. Exposes tools to check "
             "network connectivity, OS health, database connectivity, and "
@@ -171,7 +169,7 @@ def create_app() -> FastMCP:
 def main() -> None:
     """Entry point for running the MCP server."""
     app = create_app()
-    app.run(transport=SETTINGS.transport)
+    app.run(transport=SETTINGS.transport, host=SETTINGS.host, port=SETTINGS.port)
 
 
 if __name__ == "__main__":

@@ -4,9 +4,34 @@ Copyright contributors to the agentic-ai-cyberres project
 """
 
 from typing import List, Optional, Dict, Any
-from paramiko import SSHClient, AutoAddPolicy
+from paramiko import SSHClient, RejectPolicy
 import paramiko
 import logging
+import os
+
+
+def _make_ssh_client(known_hosts_path: Optional[str] = None) -> SSHClient:
+    """Return a Paramiko SSHClient that verifies host keys.
+
+    Host keys are loaded from *known_hosts_path* when provided, otherwise
+    from ``~/.ssh/known_hosts`` when the file exists.  If neither source
+    yields any entries the client falls back to ``RejectPolicy`` so that
+    connections to unrecognised hosts are refused rather than silently
+    trusted (AutoAddPolicy MITM risk).
+    """
+    client = SSHClient()
+    # Always reject unknown keys by default
+    client.set_missing_host_key_policy(RejectPolicy())
+    # Load system / user known_hosts so legitimate hosts pass verification
+    default_kh = os.path.expanduser("~/.ssh/known_hosts")
+    path = known_hosts_path or (default_kh if os.path.isfile(default_kh) else None)
+    if path and os.path.isfile(path):
+        try:
+            client.load_host_keys(path)
+        except Exception:
+            pass  # malformed file: still use RejectPolicy
+    return client
+
 
 def _ssh_exec(host: str,
               username: str,
@@ -14,10 +39,10 @@ def _ssh_exec(host: str,
               key_path: Optional[str] = None,
               cmd: str = "echo ok",
               port: int = 22,
-              timeout: float = 5.0) -> tuple[int, str, str]:
+              timeout: float = 5.0,
+              known_hosts_path: Optional[str] = None) -> tuple[int, str, str]:
     """Execute a command over SSH and return exit code, stdout, stderr."""
-    client = SSHClient()
-    client.set_missing_host_key_policy(AutoAddPolicy())
+    client = _make_ssh_client(known_hosts_path)
     try:
         if key_path:
             key = paramiko.RSAKey.from_private_key_file(key_path)
@@ -109,14 +134,18 @@ def attach(mcp):
         return ok(payload) if rc == 0 and not missing else err("service(s) missing or ssh error", code="SERVICE_CHECK_FAILED" if not rc else "SSH_ERROR", **payload)
 
     @mcp.tool()
-    def vm_validator(vm_ip: str, ssh_user: str, ssh_password: str) -> Dict[str, Any]:
+    def vm_validator(vm_ip: str, ssh_user: str, ssh_password: Optional[str] = None, ssh_key_path: Optional[str] = None) -> Dict[str, Any]:
         """Backwards compatible wrapper replicating the original vm_validator.
 
         This tool remains for compatibility with existing clients. It performs
         a root filesystem ``df`` check and verifies that ``sshd`` is active.
+
+        At least one of ``ssh_password`` or ``ssh_key_path`` must be supplied.
         """
-        disk_rc, disk_out, disk_err = _ssh_exec(vm_ip, ssh_user, password=ssh_password, cmd="df -h /")
-        svc_rc, svc_out, svc_err = _ssh_exec(vm_ip, ssh_user, password=ssh_password, cmd="systemctl is-active sshd || true")
+        if not ssh_password and not ssh_key_path:
+            return err("Provide either ssh_password or ssh_key_path", code="INPUT_ERROR")
+        disk_rc, disk_out, disk_err = _ssh_exec(vm_ip, ssh_user, password=ssh_password, key_path=ssh_key_path, cmd="df -h /")
+        svc_rc, svc_out, svc_err = _ssh_exec(vm_ip, ssh_user, password=ssh_password, key_path=ssh_key_path, cmd="systemctl is-active sshd || true")
         status = "PASS" if disk_rc == 0 and "active" in svc_out else "FAIL"
         return ok({
             "validation_status": status,
