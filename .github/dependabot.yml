@@ -1,0 +1,24 @@
+version: 2
+updates:
+  # Root-level npm package (agent.js / beeai)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+
+  # Python MCP server — use pip ecosystem against pyproject.toml.
+  # Note: uv.lock is not a format Dependabot understands natively; pointing
+  # it at pyproject.toml via the pip ecosystem is the correct approach.
+  - package-ecosystem: "pip"
+    directory: "/python/cyberres-mcp"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+
+  # Legacy Python prototype scripts
+  - package-ecosystem: "pip"
+    directory: "/python/src"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
