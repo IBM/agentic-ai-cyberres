@@ -386,7 +386,7 @@ wheels = [
 [[package]]
 name = "cyberres-mcp"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "authlib" },
     { name = "click" },
@@ -443,7 +443,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "bandit", specifier = ">=1.9.4" },
-    { name = "cyberres-mcp", virtual = "." },
+    { name = "cyberres-mcp", editable = "." },
     { name = "pip-audit", specifier = ">=2.10.1" },
 ]
 

@@ -1,6 +1,10 @@
 #
 # Copyright contributors to the agentic-ai-cyberres project
 #
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "cyberres-mcp"
 version = "0.1.0"
@@ -54,14 +58,25 @@ dev = [
 ]
 
 [project.scripts]
-cyberres-mcp = "cyberres_mcp.server:main"
+cyberres-mcp = "server:main"
+
+[tool.hatch.build.targets.wheel]
+sources = ["."]
+include = [
+    "server.py",
+    "settings.py",
+    "models.py",
+    "__init__.py",
+    "plugins/",
+    "prompts/",
+    "resources/",
+]
 
 [tool.uv.sources]
 cyberres-mcp = { workspace = true }
 
 [tool.uv.workspace]
 members = [
-    ".",
     ".",
     ".",
 ]

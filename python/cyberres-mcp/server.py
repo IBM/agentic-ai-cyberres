@@ -3,7 +3,7 @@
 # Copyright contributors to the agentic-ai-cyberres project
 #
 from __future__ import annotations
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 import os
 import json
 import logging
